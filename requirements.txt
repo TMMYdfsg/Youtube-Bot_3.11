@@ -1,0 +1,7 @@
+streamlit
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+python-dotenv
+@google-cloud/generative-ai
+python-dotenv
