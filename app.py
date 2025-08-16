@@ -38,53 +38,71 @@ PERSONAS = {
     "ゼンレスゾーンゼロ": "あなたは『ゼンレスゾーンゼロ』のストリートカルチャーに詳しいエージェントAIです。ヒップホップのスラングやノリの良い言葉を使い、スタイリッシュで都会的な雰囲気のコメントを返してください。",
     "Fortnite": "あなたはFortniteの建築マスター兼バトル戦術家のAIです。建築バトルや武器のメタ情報に詳しく、視聴者と一緒にビクロイを目指すような、エネルギッシュで競争的なコメントを返してください。",
     "Dead by Daylight": "あなたはDead by DaylightのベテランサバイバーのようなAIです。少し怖がりながらも、キラーの対策やパーク構成、脱出のコツなどを、仲間と協力するような親しみやすい口調でコメントしてください。",
-    "ヒロアカウルトラランブル": "あなたは『僕のヒーローアカデミア』の世界でヒーローを目指す卵のようなAIです。『Plus Ultra!』の精神で、キャラクターの個性やチーム連携について、熱くヒーローらしい正義感あふれるコメントをしてください。",
-    "バイオハザード7": "あなたはバイオハザード7の恐怖を生き抜いた生存者のようなAIです。少しおびえながらも、アイテムの場所や敵の倒し方について、他の生存者に助言を与えるような緊迫感のあるコメントをしてください。",
+    "ヒロアカウルトラランブル": "あなたは『僕のヒーローアカデミア ULTRA RUMBLE』のヒーローのようなAIです。勇ましく熱血な口調で、個性や戦術についてアドバイスし、視聴者と一緒にヴィランを倒す雰囲気でコメントしてください。",
+    "バイオハザード": "あなたはバイオハザードシリーズの熟練サバイバーのようなAIです。サバイバルホラーの雰囲気を大切にしつつ、冷静で慎重なアドバイスや武器・アイテムの使い方などを提供してください。",
 }
 
-# --- Session Stateの初期化 ---
-if "chat_log" not in st.session_state:
-    st.session_state.chat_log = []
-    st.session_state.running = False
-    st.session_state.stop_event = threading.Event()
-    st.session_state.selected_persona = "デフォルト"
-    st.session_state.last_reply_time = 0  # AIの最終返信時刻
-    st.session_state.live_chat_id = None
-    st.session_state.current_video_id = None
-    st.session_state.manual_chat_id = None
-    st.session_state.manual_video_id = None
-    st.session_state.ai_enabled = True
-    st.session_state.auto_greeting_enabled = True
-    st.session_state.previous_chat_id = None
-    st.session_state.start_greeting = "📢 配信が始まりました！楽しんでいってね！"
-    st.session_state.end_greeting = "📢 配信が終了しました。ご視聴ありがとうございました！"
-    st.session_state.bg_theme = "デフォルト"
-    st.session_state.bgm_volume = 0.5
-    # BGM用URL（SoundHelixのサンプル楽曲を使用）
-    st.session_state.bgm_files = {
-        "デフォルト": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
-        "原神": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3",
-        "鳴潮": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3",
-        "ゼンレスゾーンゼロ": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3",
-        "Fortnite": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3",
-        "Dead by Daylight": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-6.mp3",
-        "ヒロアカウルトラランブル": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-7.mp3",
-        "バイオハザード7": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3",
-    }
-    # 背景画像ファイル名（予め用意されたPNGファイル）
-    st.session_state.bg_images = {
-        "デフォルト": "default_bg.png",
-        "原神": "genshin_bg.png",
-        "鳴潮": "wuthering_bg.png",
-        "ゼンレスゾーンゼロ": "zenless_bg.png",
-        "Fortnite": "fortnite_bg.png",
-        "Dead by Daylight": "dbd_bg.png",
-        "ヒロアカウルトラランブル": "heroaca_bg.png",
-        "バイオハザード7": "biohazard_bg.png",
-    }
+# 背景画像のファイル名をテーマに紐づけ
+THEME_IMAGES = {
+    "デフォルト": "default_bg.png",
+    "原神": "genshin_bg.png",
+    "鳴潮": "wuthering_bg.png",
+    "ゼンレスゾーンゼロ": "zenless_bg.png",
+    "Fortnite": "fortnite_bg.png",
+    "Dead by Daylight": "dbd_bg.png",
+    "ヒロアカウルトラランブル": "heroaca_bg.png",
+    "バイオハザード": "biohazard_bg.png",
+}
 
-# --- YouTube & AI コア機能 ---
-@st.cache_resource
+# BGMファイルをテーマに紐づけ（ファイルがない場合はNone）
+THEME_BGMS = {
+    "デフォルト": None,
+    "原神": None,
+    "鳴潮": None,
+    "ゼンレスゾーンゼロ": None,
+    "Fortnite": None,
+    "Dead by Daylight": None,
+    "ヒロアカウルトラランブル": None,
+    "バイオハザード": None,
+}
+
+
+# --- グローバル状態 ---
+# 各セッションで共有する状態はst.session_stateに保存
+def initialize_session_state():
+    state_defaults = {
+        "bot_running": False,
+        "stop_event": threading.Event(),
+        "latest_comment": None,
+        "chat_id": None,
+        "live_video_id": None,
+        "ai_enabled": True,
+        "persona": "デフォルト",
+        "auto_greeting": True,
+        "sent_greeting": False,
+        "sent_closing": False,
+        "background": "デフォルト",
+        "bgm_volume": 0.5,
+        "manual_stream_url": "",
+        "manual_message": "",
+        "start_greeting_text": "配信が始まりました！みんなで楽しみましょう！",
+        "end_greeting_text": "配信を観てくれてありがとうございました！またね！",
+    }
+    for key, value in state_defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+initialize_session_state()
+
+
+# --- YouTube API関連関数 ---
+@st.cache_resource(show_spinner=False)
+def get_youtube_api():
+    return build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+
+
+# 認証処理とトークン管理
 def get_authenticated_service():
     creds = None
     if os.path.exists("token.json"):
@@ -100,288 +118,310 @@ def get_authenticated_service():
     return build("youtube", "v3", credentials=creds)
 
 
-@st.cache_resource
-def get_youtube_reader():
-    return build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
-
-
-def get_live_chat_details(reader):
-    """
-    現在配信中のライブのチャットIDと動画IDを返します。
-    ライブがない場合は (None, None) を返します。
-    """
-    try:
-        resp = (
-            reader.search()
-            .list(part="id", channelId=CHANNEL_ID, eventType="live", type="video")
-            .execute()
+# ライブ配信IDを自動検出
+def get_live_video_id(channel_id: str) -> Optional[str]:
+    youtube = get_youtube_api()
+    search_response = (
+        youtube.search()
+        .list(
+            part="id",
+            channelId=channel_id,
+            eventType="live",
+            type="video",
+            maxResults=1,
         )
-        items = resp.get("items", [])
-        if not items:
-            return None, None
-        vid = items[0]["id"]["videoId"]
-        details = reader.videos().list(id=vid, part="liveStreamingDetails").execute()
-        chat_id = details["items"][0]["liveStreamingDetails"].get("activeLiveChatId")
-        return chat_id, vid
-    except Exception as e:
-        logging.error(f"ライブ詳細取得エラー: {e}")
-        return None, None
-
-
-def parse_video_id(url: str) -> Optional[str]:
-    """指定されたYouTube URLから動画IDを抽出します。失敗した場合はNoneを返します。"""
-    import re
-    try:
-        pattern = r"(?:v=|\/)([0-9A-Za-z_-]{11})"
-        match = re.search(pattern, url)
-        return match.group(1) if match else None
-    except Exception:
-        return None
-
-
-def get_chat_id_from_video(reader, video_id: str) -> Optional[str]:
-    """動画IDからアクティブなライブチャットIDを取得します。"""
-    try:
-        details = reader.videos().list(id=video_id, part="liveStreamingDetails").execute()
-        return details["items"][0]["liveStreamingDetails"].get("activeLiveChatId")
-    except Exception as e:
-        logging.error(f"動画IDからチャットID取得エラー: {e}")
-        return None
-
-
-def send_chat_message(service, chat_id: str, text: str) -> None:
-    """指定されたチャットIDにテキストメッセージを送信します。"""
-    try:
-        service.liveChatMessages().insert(
-            part="snippet",
-            body={
-                "snippet": {
-                    "liveChatId": chat_id,
-                    "type": "textMessageEvent",
-                    "textMessageDetails": {"messageText": text},
-                }
-            },
-        ).execute()
-    except Exception as e:
-        logging.error(f"メッセージ送信エラー: {e}")
-
-
-def generate_ai_reply(msg: str, persona_key: str) -> str:
-    """Geminiモデルを使ってコメントへの返信を生成する。"""
-    persona_prompt = PERSONAS.get(persona_key, PERSONAS["デフォルト"])
-    prompt = (
-        "あなたは以下のキャラクターになりきって、視聴者のコメントに返信してください。\n\n"
-        "# キャラクター設定\n"
-        f"{persona_prompt}\n\n"
-        "# 視聴者のコメント\n"
-        f"「{msg}」\n\n"
-        "# あなたの返信（50字程度の自然な会話で）:"
+        .execute()
     )
-    res = gemini.generate_content(prompt)
-    return res.text.strip()
+    items = search_response.get("items", [])
+    if items:
+        return items[0]["id"]["videoId"]
+    return None
 
 
-def monitor_thread(reader, service, stop_event: threading.Event) -> None:
-    """
-    バックグラウンドでライブチャットを監視し、チャットログを更新してAI応答や挨拶を行うスレッド。
-    manual_chat_idが設定されていればそれを優先して監視する。
-    """
-    seen: set[str] = set()
-    while not stop_event.is_set():
-        # 手動接続があればそれを使用し、なければ自動検出
-        if st.session_state.manual_chat_id:
-            chat_id = st.session_state.manual_chat_id
-            video_id = st.session_state.manual_video_id
+# 指定動画URLからIDを取得
+def extract_video_id_from_url(url: str) -> Optional[str]:
+    if "watch?v=" in url:
+        return url.split("watch?v=")[-1].split("&")[0]
+    if "youtu.be/" in url:
+        return url.split("youtu.be/")[-1].split("?")[0]
+    return None
+
+
+# 動画IDからチャットIDを取得
+def get_live_chat_id(video_id: str) -> Optional[str]:
+    youtube = get_youtube_api()
+    response = youtube.videos().list(part="liveStreamingDetails", id=video_id).execute()
+    items = response.get("items", [])
+    if items:
+        return items[0]["liveStreamingDetails"]["activeLiveChatId"]
+    return None
+
+
+# 最新コメントを取得
+def poll_chat_messages(chat_id: str, page_token: Optional[str] = None):
+    youtube = get_authenticated_service()
+    response = (
+        youtube.liveChatMessages()
+        .list(
+            liveChatId=chat_id,
+            part="snippet,authorDetails",
+            pageToken=page_token,
+            maxResults=200,
+        )
+        .execute()
+    )
+    return response
+
+
+# コメントにAIで返答
+def generate_ai_reply(comment: str, persona: str) -> str:
+    prompt = (
+        PERSONAS.get(persona, "") + f"\n\nコメント: {comment}\n\n返答 (50文字以内):"
+    )
+    try:
+        response = gemini.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                candidate_count=1,
+                max_output_tokens=100,
+                temperature=0.7,
+            ),
+        )
+        ai_reply = response.candidates[0].content.parts[0].text.strip()
+        return ai_reply[:50]
+    except Exception as e:
+        logging.error(f"AI生成失敗: {e}")
+        return "…"
+
+
+# チャットにメッセージ送信
+def send_message(chat_id: str, message: str):
+    youtube = get_authenticated_service()
+    youtube.liveChatMessages().insert(
+        part="snippet",
+        body={
+            "snippet": {
+                "liveChatId": chat_id,
+                "type": "textMessageEvent",
+                "textMessageDetails": {"messageText": message},
+            }
+        },
+    ).execute()
+
+
+# ボットのメインループ
+def bot_loop():
+    st.session_state.sent_greeting = False
+    st.session_state.sent_closing = False
+    while not st.session_state.stop_event.is_set():
+        if st.session_state.manual_stream_url:
+            video_id = extract_video_id_from_url(st.session_state.manual_stream_url)
+            if video_id != st.session_state.live_video_id:
+                st.session_state.live_video_id = video_id
+                st.session_state.chat_id = get_live_chat_id(video_id)
         else:
-            chat_id, video_id = get_live_chat_details(reader)
+            current_live = get_live_video_id(CHANNEL_ID)
+            if current_live != st.session_state.live_video_id:
+                st.session_state.live_video_id = current_live
+                st.session_state.chat_id = get_live_chat_id(current_live)
 
-        st.session_state.live_chat_id = chat_id
-        st.session_state.current_video_id = video_id
+        chat_id = st.session_state.chat_id
 
-        # 自動挨拶の処理
-        prev = st.session_state.previous_chat_id
-        if st.session_state.auto_greeting_enabled:
-            if prev is None and chat_id:
-                try:
-                    send_chat_message(service, chat_id, st.session_state.start_greeting)
-                except Exception as e:
-                    logging.error(f"開始挨拶送信エラー: {e}")
-            elif prev and not chat_id:
-                try:
-                    send_chat_message(service, prev, st.session_state.end_greeting)
-                except Exception as e:
-                    logging.error(f"終了挨拶送信エラー: {e}")
-        st.session_state.previous_chat_id = chat_id
-
-        if not chat_id:
-            logging.info("ライブ配信が見つかりません。20秒後に再試行します。")
-            time.sleep(20)
-            continue
-
-        try:
-            res = (
-                reader.liveChatMessages()
-                .list(liveChatId=chat_id, part="snippet,authorDetails")
-                .execute()
-            )
-            for item in res.get("items", []):
-                cid = item["id"]
-                if cid in seen:
-                    continue
-                seen.add(cid)
-
-                user = item["authorDetails"]["displayName"]
-                text = item["snippet"]["displayMessage"]
-                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-                st.session_state.chat_log.append({"author": user, "msg": text, "time": timestamp})
-
-                # AI応答
-                cooldown = 15
-                should_reply = (
-                    user != "AI Bot"
-                    and (time.time() - st.session_state.last_reply_time > cooldown)
-                    and st.session_state.ai_enabled
+        # 挨拶メッセージの自動送信
+        if st.session_state.auto_greeting:
+            if chat_id and not st.session_state.sent_greeting:
+                send_message(chat_id, st.session_state.start_greeting_text)
+                st.session_state.sent_greeting = True
+            if (
+                not chat_id
+                and st.session_state.sent_greeting
+                and not st.session_state.sent_closing
+            ):
+                send_message(
+                    st.session_state.chat_id, st.session_state.end_greeting_text
                 )
-                if should_reply:
-                    time.sleep(random.uniform(2, 4))
-                    reply = generate_ai_reply(text, st.session_state.selected_persona)
-                    try:
-                        send_chat_message(service, chat_id, reply)
-                    except Exception as e:
-                        logging.error(f"AI応答送信エラー: {e}")
-                    st.session_state.last_reply_time = time.time()
-                    st.session_state.chat_log.append({"author": "AI Bot", "msg": reply, "time": timestamp})
+                st.session_state.sent_closing = True
 
-            time.sleep(10)
-        except Exception as e:
-            logging.error(f"監視ループでエラー: {e}")
-            time.sleep(20)
+        if chat_id:
+            response = poll_chat_messages(chat_id)
+            messages = response.get("items", [])
+            for item in reversed(messages):
+                text = item["snippet"]["textMessageDetails"]["messageText"]
+                author = item["authorDetails"]["displayName"]
+                published = item["snippet"]["publishedAt"]
+                message_entry = {
+                    "text": text,
+                    "author": author,
+                    "published": published,
+                    "is_bot": False,
+                }
+                st.session_state.latest_comment = message_entry
+
+                if (
+                    st.session_state.ai_enabled
+                    and not item["authorDetails"]["isChatOwner"]
+                    and not item["authorDetails"]["isChatModerator"]
+                    and not item["authorDetails"]["isChatSponsor"]
+                ):
+                    ai_response = generate_ai_reply(text, st.session_state.persona)
+                    send_message(chat_id, ai_response)
+
+        time.sleep(5)
 
 
-# --- UI ---
-st.title("🤖 YouTube Gemini Bot")
-col_left, col_right = st.columns([3, 1])
-
-with col_left:
-    # ステータス表示
-    if st.session_state.live_chat_id:
-        st.success(f"✅ 接続中のライブチャットID: {st.session_state.live_chat_id}")
-    else:
-        st.info("🔍 現在接続中のライブチャットはありません")
-
-    # ライブ映像の埋め込み
-    if st.session_state.current_video_id:
-        video_src = f"https://www.youtube.com/embed/{st.session_state.current_video_id}?autoplay=0"
-        st.components.v1.html(
-            f'<iframe width="100%" height="360" src="{video_src}" frameborder="0" allowfullscreen></iframe>',
-            height=360,
+# --- UI表示 ---
+def display_background(theme: str):
+    image_file = THEME_IMAGES.get(theme, "default_bg.png")
+    image_path = os.path.join(os.path.dirname(__file__), image_file)
+    if os.path.exists(image_path):
+        st.markdown(
+            f"""
+            <style>
+            .stApp {{
+                background-image: url("data:image/png;base64,{base64_image(image_path)}");
+                background-size: cover;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
         )
 
-    # Bot開始・停止
-    if not st.session_state.running:
-        if st.button("🟢 Bot開始"):
-            reader = get_youtube_reader()
-            service = get_authenticated_service()
-            st.session_state.stop_event.clear()
-            threading.Thread(
-                target=monitor_thread,
-                args=(reader, service, st.session_state.stop_event),
-                daemon=True,
-            ).start()
-            st.session_state.running = True
-            st.rerun()
-    else:
-        if st.button("🔴 Bot停止"):
-            st.session_state.stop_event.set()
-            st.session_state.running = False
-            # 手動接続状態も解除
-            st.session_state.manual_chat_id = None
-            st.session_state.manual_video_id = None
-            st.rerun()
 
-    st.markdown("---")
-    # チャットログ表示（最新50件）
-    for entry in reversed(st.session_state.chat_log[-50:]):
-        st.write(f"[{entry['time']}] **{entry['author']}**: {entry['msg']}")
+# 画像をbase64エンコード
+def base64_image(file_path: str) -> str:
+    import base64
 
-with col_right:
-    # AIペルソナ選択
-    st.selectbox("AIペルソナを選択:", list(PERSONAS.keys()), key="selected_persona")
-    # AI応答ON/OFF
-    st.checkbox("AI自動応答を有効にする", value=st.session_state.ai_enabled, key="ai_enabled")
-    # 自動挨拶ON/OFF
-    st.checkbox("自動挨拶を有効にする", value=st.session_state.auto_greeting_enabled, key="auto_greeting_enabled")
+    with open(file_path, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
 
-    st.markdown("---")
-    # 手動メッセージ送信
-    user_msg = st.text_input("手動送信メッセージ")
-    if st.button("💬 送信") and user_msg:
-        if st.session_state.live_chat_id:
-            service = get_authenticated_service()
-            send_chat_message(service, st.session_state.live_chat_id, user_msg)
-            st.session_state.chat_log.append({
-                "author": "You",
-                "msg": user_msg,
-                "time": datetime.datetime.now().strftime("%H:%M:%S"),
-            })
-            st.rerun()
+
+# BGM埋め込み
+def play_bgm(bgm_path: Optional[str], volume: float):
+    if not bgm_path or not os.path.exists(bgm_path):
+        return
+    st.audio(bgm_path, format="audio/mp3", start_time=0)
+    st.write(
+        f"""
+        <script>
+        const audioElems = document.getElementsByTagName('audio');
+        for (const audio of audioElems) {{
+            audio.volume = {volume};
+        }}
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# サイドバーUI
+def sidebar_controls():
+    with st.sidebar:
+        st.title("コントロールパネル")
+        # Bot起動/停止
+        if st.session_state.bot_running:
+            if st.button("Bot停止"):
+                st.session_state.stop_event.set()
+                st.session_state.bot_running = False
+                st.success("Botを停止しました")
         else:
-            st.warning("ライブ配信に接続していません。")
+            if st.button("Bot開始"):
+                st.session_state.stop_event.clear()
+                bot_thread = threading.Thread(target=bot_loop, daemon=True)
+                bot_thread.start()
+                st.session_state.bot_running = True
+                st.success("Botを開始しました")
 
-    # 挨拶メッセージの手動送信
-    if st.button("👋 開始挨拶を送信"):
-        if st.session_state.live_chat_id:
-            service = get_authenticated_service()
-            send_chat_message(service, st.session_state.live_chat_id, st.session_state.start_greeting)
-        else:
-            st.warning("ライブ配信に接続していません。")
-    if st.button("👋 終了挨拶を送信"):
-        if st.session_state.live_chat_id:
-            service = get_authenticated_service()
-            send_chat_message(service, st.session_state.live_chat_id, st.session_state.end_greeting)
-        else:
-            st.warning("ライブ配信に接続していません。")
-
-    st.markdown("---")
-    # 手動配信接続
-    manual_url = st.text_input("YouTubeライブのURLを入力", key="manual_url")
-    if st.button("🔗 手動接続"):
-        vid = parse_video_id(manual_url)
-        if vid:
-            reader = get_youtube_reader()
-            chat_id = get_chat_id_from_video(reader, vid)
-            if chat_id:
-                st.session_state.manual_chat_id = chat_id
-                st.session_state.manual_video_id = vid
-                st.success("手動でライブ配信に接続しました。Botを開始すると監視が始まります。")
+        # 手動接続URL
+        st.text_input(
+            "手動配信URL",
+            key="manual_stream_url",
+            placeholder="https://www.youtube.com/watch?v=...",
+        )
+        if st.button("手動接続"):
+            video_id = extract_video_id_from_url(st.session_state.manual_stream_url)
+            if video_id:
+                st.session_state.live_video_id = video_id
+                st.session_state.chat_id = get_live_chat_id(video_id)
+                st.success(f"手動で動画に接続しました: {video_id}")
             else:
-                st.error("指定された動画はライブ配信ではないか、チャットIDを取得できませんでした。")
+                st.error("動画IDが抽出できませんでした")
+
+        # AI設定
+        st.checkbox(
+            "AI自動応答を有効にする",
+            value=st.session_state.ai_enabled,
+            key="ai_enabled",
+        )
+        st.selectbox("AIペルソナを選択", list(PERSONAS.keys()), key="persona")
+        # 挨拶設定
+        st.checkbox(
+            "挨拶の自動送信を有効にする",
+            value=st.session_state.auto_greeting,
+            key="auto_greeting",
+        )
+        st.text_input(
+            "開始挨拶メッセージ",
+            value=st.session_state.start_greeting_text,
+            key="start_greeting_text",
+        )
+        st.text_input(
+            "終了挨拶メッセージ",
+            value=st.session_state.end_greeting_text,
+            key="end_greeting_text",
+        )
+        if st.button("開始挨拶を送信"):
+            if st.session_state.chat_id:
+                send_message(
+                    st.session_state.chat_id, st.session_state.start_greeting_text
+                )
+                st.success("開始挨拶を送信しました")
+            else:
+                st.warning("ライブ配信に接続していません")
+        if st.button("終了挨拶を送信"):
+            if st.session_state.chat_id:
+                send_message(
+                    st.session_state.chat_id, st.session_state.end_greeting_text
+                )
+                st.success("終了挨拶を送信しました")
+            else:
+                st.warning("ライブ配信に接続していません")
+
+        # テーマ設定
+        st.selectbox("テーマ背景を選択", list(THEME_IMAGES.keys()), key="background")
+        if THEME_BGMS.get(st.session_state.background):
+            st.slider(
+                "BGM音量", 0.0, 1.0, st.session_state.bgm_volume, 0.05, key="bgm_volume"
+            )
+
+
+# メインレイアウト表示
+def main_layout():
+    sidebar_controls()
+    display_background(st.session_state.background)
+    bgm_file = THEME_BGMS.get(st.session_state.background)
+    play_bgm(bgm_file, st.session_state.bgm_volume)
+
+    # ライブ映像とログ
+    col1, col2 = st.columns(2)
+    with col1:
+        st.header("ライブ映像")
+        if st.session_state.live_video_id:
+            st.video(
+                f"https://www.youtube.com/embed/{st.session_state.live_video_id}?autoplay=1"
+            )
         else:
-            st.error("URLから動画IDを抽出できませんでした。URLを確認してください。")
+            st.write("現在接続中のライブ配信はありません")
+    with col2:
+        st.header("チャットログ")
+        if st.session_state.latest_comment:
+            st.text(
+                f"[{st.session_state.latest_comment['published']}] {st.session_state.latest_comment['author']}: {st.session_state.latest_comment['text']}"
+            )
+        else:
+            st.write("チャットはまだありません")
 
-    st.markdown("---")
-    # テーマ背景切替
-    theme_options = list(st.session_state.bgm_files.keys())
-    selected_theme = st.selectbox("テーマ背景を選択", theme_options, key="bg_theme")
-    # BGM URL更新
-    st.session_state.bgm_url = st.session_state.bgm_files.get(selected_theme, st.session_state.bgm_files["デフォルト"])
-    # 音量スライダー
-    volume = st.slider("BGM音量", min_value=0.0, max_value=1.0, value=st.session_state.bgm_volume, step=0.05, key="bgm_volume")
-    # 背景画像表示
-    bg_image_path = st.session_state.bg_images.get(selected_theme)
-    if bg_image_path and os.path.exists(bg_image_path):
-        st.image(bg_image_path, use_column_width=True)
-    # BGMプレイヤー（HTML5オーディオ）
-    audio_html = f"""
-        <audio controls autoplay loop style="width:100%" volume="{volume}">
-            <source src="{st.session_state.bgm_url}" type="audio/mpeg">
-        </audio>
-    """
-    st.components.v1.html(audio_html, height=80)
-    st.write("※ 音量はブラウザ側でも調整可能です。背景画像がない場合はデフォルト背景が使用されます。")
 
-# --- UI自動更新 ---
-if st.session_state.running:
-    # 5秒ごとに画面を再描画して最新のチャットを表示
-    time.sleep(5)
-    st.rerun()
+# --- 実行 ---
+if __name__ == "__main__":
+    main_layout()
