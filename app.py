@@ -57,9 +57,7 @@ if "chat_log" not in st.session_state:
     st.session_state.auto_greeting_enabled = True
     st.session_state.previous_chat_id = None
     st.session_state.start_greeting = "📢 配信が始まりました！楽しんでいってね！"
-    st.session_state.end_greeting = (
-        "📢 配信が終了しました。ご視聴ありがとうございました！"
-    )
+    st.session_state.end_greeting = "📢 配信が終了しました。ご視聴ありがとうございました！"
     st.session_state.bg_theme = "デフォルト"
     st.session_state.bgm_volume = 0.5
     # BGM用URL（SoundHelixのサンプル楽曲を使用）
@@ -84,7 +82,6 @@ if "chat_log" not in st.session_state:
         "ヒロアカウルトラランブル": "heroaca_bg.png",
         "バイオハザード7": "biohazard_bg.png",
     }
-
 
 # --- YouTube & AI コア機能 ---
 @st.cache_resource
@@ -134,7 +131,6 @@ def get_live_chat_details(reader):
 def parse_video_id(url: str) -> Optional[str]:
     """指定されたYouTube URLから動画IDを抽出します。失敗した場合はNoneを返します。"""
     import re
-
     try:
         pattern = r"(?:v=|\/)([0-9A-Za-z_-]{11})"
         match = re.search(pattern, url)
@@ -146,9 +142,7 @@ def parse_video_id(url: str) -> Optional[str]:
 def get_chat_id_from_video(reader, video_id: str) -> Optional[str]:
     """動画IDからアクティブなライブチャットIDを取得します。"""
     try:
-        details = (
-            reader.videos().list(id=video_id, part="liveStreamingDetails").execute()
-        )
+        details = reader.videos().list(id=video_id, part="liveStreamingDetails").execute()
         return details["items"][0]["liveStreamingDetails"].get("activeLiveChatId")
     except Exception as e:
         logging.error(f"動画IDからチャットID取得エラー: {e}")
@@ -239,9 +233,7 @@ def monitor_thread(reader, service, stop_event: threading.Event) -> None:
                 user = item["authorDetails"]["displayName"]
                 text = item["snippet"]["displayMessage"]
                 timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-                st.session_state.chat_log.append(
-                    {"author": user, "msg": text, "time": timestamp}
-                )
+                st.session_state.chat_log.append({"author": user, "msg": text, "time": timestamp})
 
                 # AI応答
                 cooldown = 15
@@ -258,9 +250,7 @@ def monitor_thread(reader, service, stop_event: threading.Event) -> None:
                     except Exception as e:
                         logging.error(f"AI応答送信エラー: {e}")
                     st.session_state.last_reply_time = time.time()
-                    st.session_state.chat_log.append(
-                        {"author": "AI Bot", "msg": reply, "time": timestamp}
-                    )
+                    st.session_state.chat_log.append({"author": "AI Bot", "msg": reply, "time": timestamp})
 
             time.sleep(10)
         except Exception as e:
@@ -318,15 +308,9 @@ with col_right:
     # AIペルソナ選択
     st.selectbox("AIペルソナを選択:", list(PERSONAS.keys()), key="selected_persona")
     # AI応答ON/OFF
-    st.checkbox(
-        "AI自動応答を有効にする", value=st.session_state.ai_enabled, key="ai_enabled"
-    )
+    st.checkbox("AI自動応答を有効にする", value=st.session_state.ai_enabled, key="ai_enabled")
     # 自動挨拶ON/OFF
-    st.checkbox(
-        "自動挨拶を有効にする",
-        value=st.session_state.auto_greeting_enabled,
-        key="auto_greeting_enabled",
-    )
+    st.checkbox("自動挨拶を有効にする", value=st.session_state.auto_greeting_enabled, key="auto_greeting_enabled")
 
     st.markdown("---")
     # 手動メッセージ送信
@@ -335,13 +319,11 @@ with col_right:
         if st.session_state.live_chat_id:
             service = get_authenticated_service()
             send_chat_message(service, st.session_state.live_chat_id, user_msg)
-            st.session_state.chat_log.append(
-                {
-                    "author": "You",
-                    "msg": user_msg,
-                    "time": datetime.datetime.now().strftime("%H:%M:%S"),
-                }
-            )
+            st.session_state.chat_log.append({
+                "author": "You",
+                "msg": user_msg,
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+            })
             st.rerun()
         else:
             st.warning("ライブ配信に接続していません。")
@@ -350,17 +332,13 @@ with col_right:
     if st.button("👋 開始挨拶を送信"):
         if st.session_state.live_chat_id:
             service = get_authenticated_service()
-            send_chat_message(
-                service, st.session_state.live_chat_id, st.session_state.start_greeting
-            )
+            send_chat_message(service, st.session_state.live_chat_id, st.session_state.start_greeting)
         else:
             st.warning("ライブ配信に接続していません。")
     if st.button("👋 終了挨拶を送信"):
         if st.session_state.live_chat_id:
             service = get_authenticated_service()
-            send_chat_message(
-                service, st.session_state.live_chat_id, st.session_state.end_greeting
-            )
+            send_chat_message(service, st.session_state.live_chat_id, st.session_state.end_greeting)
         else:
             st.warning("ライブ配信に接続していません。")
 
@@ -375,13 +353,9 @@ with col_right:
             if chat_id:
                 st.session_state.manual_chat_id = chat_id
                 st.session_state.manual_video_id = vid
-                st.success(
-                    "手動でライブ配信に接続しました。Botを開始すると監視が始まります。"
-                )
+                st.success("手動でライブ配信に接続しました。Botを開始すると監視が始まります。")
             else:
-                st.error(
-                    "指定された動画はライブ配信ではないか、チャットIDを取得できませんでした。"
-                )
+                st.error("指定された動画はライブ配信ではないか、チャットIDを取得できませんでした。")
         else:
             st.error("URLから動画IDを抽出できませんでした。URLを確認してください。")
 
@@ -390,18 +364,9 @@ with col_right:
     theme_options = list(st.session_state.bgm_files.keys())
     selected_theme = st.selectbox("テーマ背景を選択", theme_options, key="bg_theme")
     # BGM URL更新
-    st.session_state.bgm_url = st.session_state.bgm_files.get(
-        selected_theme, st.session_state.bgm_files["デフォルト"]
-    )
+    st.session_state.bgm_url = st.session_state.bgm_files.get(selected_theme, st.session_state.bgm_files["デフォルト"])
     # 音量スライダー
-    volume = st.slider(
-        "BGM音量",
-        min_value=0.0,
-        max_value=1.0,
-        value=st.session_state.bgm_volume,
-        step=0.05,
-        key="bgm_volume",
-    )
+    volume = st.slider("BGM音量", min_value=0.0, max_value=1.0, value=st.session_state.bgm_volume, step=0.05, key="bgm_volume")
     # 背景画像表示
     bg_image_path = st.session_state.bg_images.get(selected_theme)
     if bg_image_path and os.path.exists(bg_image_path):
@@ -413,9 +378,7 @@ with col_right:
         </audio>
     """
     st.components.v1.html(audio_html, height=80)
-    st.write(
-        "※ 音量はブラウザ側でも調整可能です。背景画像がない場合はデフォルト背景が使用されます。"
-    )
+    st.write("※ 音量はブラウザ側でも調整可能です。背景画像がない場合はデフォルト背景が使用されます。")
 
 # --- UI自動更新 ---
 if st.session_state.running:
