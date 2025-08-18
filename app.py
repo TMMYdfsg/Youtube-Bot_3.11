@@ -1,30 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-YouTubeBOT（統合・単一ファイル版）
+YouTubeBOT（統合・単一ファイル版・完全統合）
 - Streamlit 管理画面
 - YouTube Live 自動/手動接続、チャット監視、投稿
 - Google Gemini による50文字以内の自動応答（ペルソナ切替）
 - personas.json をホットリロード（保存→即反映）
 - BGM / テーマ背景 / ステータス表示
+- ゲームごとの画像・BGM選択（/images, /audio）
 - OAuth: client_secret.json + token.json を使用
 
-必要ファイル:
-- client_secret.json（Google Cloud OAuth クライアント）
-- personas.json（ペルソナ定義。任意の場所、既定は同階層）
-- （任意）.streamlit/secrets.toml で APIキーや既定設定
-
-secrets 例:
-[general]
-CHANNEL_ID = "UCxxxxxxxx"  # 既定のチャンネルID
-PERSONAS_PATH = "personas.json"
-GEMINI_API_KEY = "xxxxx"
-THEME_BG_URL = ""   # 既定背景画像URL（空でも可）
-BGM_URL = ""        # 既定BGM URL（空でも可）
-
-メモ:
-- get_youtube_service の creds 引数は _creds としてキャッシュ除外（UnhashableParamError対処）
-- personas.json は最終更新時刻(mtime)をキャッシュキーに含めてホットリロード
-- start/end 挨拶のテキストエリアは「キャラ別の動的キー」を使って Streamlit の更新制約を回避
+補足:
+- 画像/音声はローカル相対パスでもOK（自動で data URI に変換して埋め込み表示）
+- personas.json が不正でも落ちない（フォールバック）
+- セッションキー未初期化時の KeyError（chat_lock など）を回避
 """
 
 from __future__ import annotations
@@ -32,7 +20,8 @@ import os
 import re
 import json
 import time
-import queue
+import base64
+import mimetypes
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -60,26 +49,61 @@ except Exception:
 # ============================================================
 SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 JST = timezone(timedelta(hours=9), name="JST")
-
-# Regex: YouTube URL から videoId を抽出
 YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|/live/|/shorts/)([A-Za-z0-9_-]{11})")
+PERSONAS_DEFAULT_PATH = "personas.json"
+
+
+# ============================================================
+# 画像/音声 ヘルパ
+# ============================================================
+def is_url(path_or_url: str) -> bool:
+    u = (path_or_url or "").strip().lower()
+    return u.startswith("http://") or u.startswith("https://") or u.startswith("data:")
+
+
+def file_to_data_url(path: str) -> Optional[str]:
+    """ローカルファイルを data:URI に変換。存在しない場合 None。"""
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    mime, _ = mimetypes.guess_type(str(p))
+    if not mime:
+        # 拡張子不明でも画像/音声で仮定
+        if p.suffix.lower() in (".jpg", ".jpeg"):
+            mime = "image/jpeg"
+        elif p.suffix.lower() == ".png":
+            mime = "image/png"
+        elif p.suffix.lower() in (".mp3",):
+            mime = "audio/mpeg"
+        elif p.suffix.lower() in (".m4a",):
+            mime = "audio/mp4"
+        elif p.suffix.lower() in (".ogg",):
+            mime = "audio/ogg"
+        else:
+            mime = "application/octet-stream"
+    b = p.read_bytes()
+    return f"data:{mime};base64,{base64.b64encode(b).decode('ascii')}"
+
 
 # ============================================================
 # ペルソナ ローディング（JSON ホットリロード）
 # ============================================================
-PERSONAS_DEFAULT_PATH = "personas.json"
-
-
 @st.cache_data(show_spinner=False)
 def load_personas(json_path: str, _mtime: float) -> Dict[str, Any]:
     p = Path(json_path)
     if not p.exists():
+        st.warning(f"personas.json が見つかりません: {json_path}")
         return {"personas": []}
-    with p.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        st.error("personas.json の読み込みに失敗しました（JSON形式が不正です）。")
+        return {"personas": []}
 
 
-# 柔軟なフォーマット吸収 → 正規化
 @dataclass
 class CharacterGreetings:
     start: str = ""
@@ -129,7 +153,6 @@ def normalize_personas(raw: Dict[str, Any]) -> List[Persona]:
             )
         personas.append(Persona(name=pname, characters=chars))
     if not personas:
-        # フォールバック
         personas = [
             Persona(
                 name="デフォルト",
@@ -434,39 +457,44 @@ class ChatWatcher:
 
 
 # ============================================================
-# UI 初期化
+# UI 初期化 & チャット管理
 # ============================================================
 
 
 def init_session_state():
     ss = st.session_state
-    ss.setdefault(
-        "personas_path", st.secrets.get("PERSONAS_PATH", PERSONAS_DEFAULT_PATH)
-    )
-    ss.setdefault("yt_connected", False)
-    ss.setdefault("yt_video_id", "")
-    ss.setdefault("yt_live_chat_id", "")
-    ss.setdefault("yt_channel_id", st.secrets.get("CHANNEL_ID", ""))
-    ss.setdefault("chat_log", [])
-    ss.setdefault("chat_lock", threading.Lock())
-    ss.setdefault("stop_event", threading.Event())
-    ss.setdefault("watcher_thread", None)
-    ss.setdefault("auto_greet", True)
-    ss.setdefault("ai_enabled", True)
-    ss.setdefault("bg_url", st.secrets.get("THEME_BG_URL", ""))
-    ss.setdefault("bgm_url", st.secrets.get("BGM_URL", ""))
-    ss.setdefault("bgm_volume", 0.2)
-    ss.setdefault(
-        "gemini_api_key",
-        st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", "")),
-    )
-    ss.setdefault("my_channel_id", None)  # 自分のチャンネルID（必要なら取得）
-    ss.setdefault("selected_persona_name", None)
-    ss.setdefault("selected_character_name", None)
+    defaults = {
+        "personas_path": st.secrets.get("PERSONAS_PATH", PERSONAS_DEFAULT_PATH),
+        "yt_connected": False,
+        "yt_video_id": "",
+        "yt_live_chat_id": "",
+        "yt_channel_id": st.secrets.get("CHANNEL_ID", ""),
+        "chat_log": [],
+        "chat_lock": threading.Lock(),
+        "stop_event": threading.Event(),
+        "watcher_thread": None,
+        "auto_greet": True,
+        "ai_enabled": True,
+        "bg_url": st.secrets.get("THEME_BG_URL", ""),
+        "bgm_url": st.secrets.get("BGM_URL", ""),
+        "bgm_volume": 0.2,
+        "gemini_api_key": st.secrets.get(
+            "GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", "")
+        ),
+        "my_channel_id": None,  # 自分のチャンネルID（必要なら取得）
+        "selected_persona_name": None,
+        "selected_character_name": None,
+        "selected_game": "なし",
+    }
+    for k, v in defaults.items():
+        if k not in ss:
+            ss[k] = v
 
 
 def append_chat(row: Dict[str, Any]):
     ss = st.session_state
+    if "chat_lock" not in ss:
+        ss["chat_lock"] = threading.Lock()  # フォールバック初期化
     with ss.chat_lock:
         ss.chat_log.append(row)
 
@@ -476,9 +504,17 @@ def append_chat(row: Dict[str, Any]):
 # ============================================================
 
 
-def render_background_css(url: str):
-    if not url:
+def render_background_css(src: str):
+    if not src:
         return
+    url = src
+    if not is_url(src):
+        data = file_to_data_url(src)
+        if data:
+            url = data
+        else:
+            st.warning(f"背景画像が見つかりません: {src}")
+            return
     st.markdown(
         f"""
         <style>
@@ -501,20 +537,87 @@ def render_background_css(url: str):
     )
 
 
-def render_bgm_player(url: str, volume: float):
-    if not url:
+def render_bgm_player(src: str, volume: float):
+    if not src:
         return
-    vol = max(0.0, min(1.0, volume))
+    vol = max(0.0, min(1.0, float(volume)))
+    url = src
+    if not is_url(src):
+        data = file_to_data_url(src)
+        if data:
+            url = data
+        else:
+            st.warning(f"BGMファイルが見つかりません: {src}")
+            return
     st_html(
         f"""
         <audio id="bgm" src="{url}" autoplay loop></audio>
         <script>
         const audio = document.getElementById('bgm');
-        audio.volume = {vol};
+        if (audio) {{ audio.volume = {vol}; }}
         </script>
         """,
         height=0,
     )
+
+
+def render_chat_log():
+    with st.container(height=420):
+        for row in st.session_state.chat_log[-500:]:
+            who = "🟢" if not row.get("bot") else "🤖"
+            ts = row.get("time")
+            author = row.get("author")
+            text = row.get("text")
+            if row.get("bot"):
+                st.markdown(
+                    f"<div style='background:#333;padding:6px;border-radius:8px;'>{who} <b>{author}</b> <code>[{ts}]</code><br>{text}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"<div style='padding:6px;border-radius:8px;'>{who} <b>{author}</b> <code>[{ts}]</code><br>{text}</div>",
+                    unsafe_allow_html=True,
+                )
+            st.divider()
+
+
+# ============================================================
+# ゲームメディア定義
+# ============================================================
+GAME_MEDIA = {
+    "Dead by Daylight": {
+        "image": "images/Dead by Daylight.jpg",
+        "audio": "audio/Dead by Daylight.mp3",
+    },
+    "Fortnite": {
+        "image": "images/Fortnite.jpg",
+        "audio": "audio/Fortnite.mp3",
+    },
+    "ゼンレスゾーンゼロ": {
+        "image": "images/ゼンレスゾーンゼロ.jpg",
+        "audio": "audio/ゼンレスゾーンゼロ.mp3",
+    },
+    "バイオハザード7": {
+        "image": "images/バイオハザード7.jpg",
+        "audio": "audio/バイオハザード7.mp3",
+    },
+    "ヒロアカウルトラランブル": {
+        "image": "images/ヒロアカウルトラランブル.jpg",
+        "audio": "audio/ヒロアカウルトラランブル.mp3",
+    },
+    "原神": {
+        "image": "images/原神.jpg",
+        "audio": "audio/原神.mp3",
+    },
+    "鳴潮": {
+        "image": "images/鳴潮.jpg",
+        "audio": "audio/鳴潮.mp3",
+    },
+}
+
+# ============================================================
+# サイドバー UI
+# ============================================================
 
 
 def sidebar_controls(personas: List[Persona]):
@@ -522,6 +625,7 @@ def sidebar_controls(personas: List[Persona]):
 
     with st.sidebar:
         st.subheader("⚙️ コントロール")
+
         # Google 認証 & サービス
         auth_col1, auth_col2 = st.columns([1, 1])
         if auth_col1.button("🔐 Google 認証"):
@@ -550,7 +654,7 @@ def sidebar_controls(personas: List[Persona]):
             if st.button(
                 "📡 ライブ検出して接続",
                 use_container_width=True,
-                disabled=not hasattr(ss, "yt_service"),
+                disabled=("yt_service" not in ss),
             ):
                 vid = search_live_video_id_by_channel(ss.yt_service, ss.yt_channel_id)
                 if not vid:
@@ -562,7 +666,7 @@ def sidebar_controls(personas: List[Persona]):
             if st.button(
                 "🔗 手動接続",
                 use_container_width=True,
-                disabled=not hasattr(ss, "yt_service"),
+                disabled=("yt_service" not in ss),
             ):
                 vid = extract_video_id(manual)
                 if not vid:
@@ -641,11 +745,27 @@ def sidebar_controls(personas: List[Persona]):
         )
         ss.auto_greet = st.toggle("接続/切断で自動挨拶", value=ss.auto_greet)
 
-        # テーマ / BGM
+        # ゲーム選択 → 背景 & BGM 切替
         st.divider()
-        st.markdown("**✨ 演出**")
-        ss.bg_url = st.text_input("背景画像URL", value=ss.bg_url)
-        ss.bgm_url = st.text_input("BGM URL (mp3/m4a/ogg)", value=ss.bgm_url)
+        st.markdown("**🎮 ゲーム演出**")
+        game_choice = st.selectbox(
+            "ゲームを選択",
+            ["なし"] + list(GAME_MEDIA.keys()),
+            index=(["なし"] + list(GAME_MEDIA.keys())).index(
+                ss.get("selected_game", "なし")
+            ),
+        )
+        if game_choice != ss.get("selected_game"):
+            ss.selected_game = game_choice
+        if game_choice != "なし":
+            media = GAME_MEDIA[game_choice]
+            # 背景・BGM を自動設定（ローカル → data URI 埋め込み）
+            ss.bg_url = media["image"]
+            ss.bgm_url = media["audio"]
+        else:
+            # 手動入力モード（従来通り）
+            ss.bg_url = st.text_input("背景画像パス/URL", value=ss.bg_url)
+            ss.bgm_url = st.text_input("BGM パス/URL (mp3/m4a/ogg)", value=ss.bgm_url)
         ss.bgm_volume = st.slider("BGM 音量", 0.0, 1.0, float(ss.bgm_volume), 0.01)
 
         # 動作
@@ -664,12 +784,14 @@ def sidebar_controls(personas: List[Persona]):
         st.caption("© YouTubeBOT / Streamlit")
 
 
-# 接続処理（動画ID → liveChatId）
+# ============================================================
+# 接続処理 / 監視開始/停止
+# ============================================================
 
 
 def connect_to_video_id(video_id: str):
     ss = st.session_state
-    if not hasattr(ss, "yt_service"):
+    if "yt_service" not in ss:
         st.warning("先に『Google 認証』を実行してください")
         return
     live_chat_id = get_live_chat_id(ss.yt_service, video_id)
@@ -702,9 +824,6 @@ def connect_to_video_id(video_id: str):
                 "sent": True,
             }
         )
-
-
-# 監視開始/停止
 
 
 def current_persona_and_character() -> Tuple[Optional[Persona], Optional[Character]]:
@@ -782,7 +901,7 @@ def stop_watch(send_goodbye: bool = False):
                     "sent": True,
                 }
             )
-    # 接続状態は維持（必要ならここで切断フラグも）
+    # 接続状態は維持
 
 
 # ============================================================
@@ -883,7 +1002,7 @@ def main():
 
     with right:
         st.subheader("🧭 ステータス")
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("接続", "✅" if st.session_state.get("yt_connected") else "❌")
         c2.metric("AI", "ON" if st.session_state.get("ai_enabled") else "OFF")
         c3.metric(
@@ -897,6 +1016,7 @@ def main():
                 else "STOP"
             ),
         )
+        c4.metric("ゲーム", st.session_state.get("selected_game", "なし"))
 
         st.code(
             json.dumps(
@@ -906,6 +1026,7 @@ def main():
                     "channel_id": st.session_state.get("yt_channel_id"),
                     "persona": st.session_state.get("selected_persona_name"),
                     "character": st.session_state.get("selected_character_name"),
+                    "game": st.session_state.get("selected_game"),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -913,14 +1034,7 @@ def main():
         )
 
         st.markdown("### 📜 チャットログ")
-        with st.container(height=420):
-            for row in st.session_state.chat_log[-500:]:
-                who = "🟢" if not row.get("bot") else "🤖"
-                ts = row.get("time")
-                author = row.get("author")
-                text = row.get("text")
-                st.markdown(f"{who}  **{author}** `[{ts}]`\n\n{text}")
-                st.divider()
+        render_chat_log()
 
 
 # ============================================================
