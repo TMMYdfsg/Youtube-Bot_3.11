@@ -1,18 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-YouTubeBOT（統合・完全改良版 / Ultra UI）
-- Streamlit 管理画面（ガラス質感 + グラデーション + チャットバブル）
-- YouTube Live 自動/手動接続、チャット監視、投稿（接続ボタンの反応性改善）
-- Google Gemini による50文字以内の自動応答（ペルソナ切替）
+YouTubeBOT（完全統合・Mobile First / ValueError修正）
+- スマホ優先の単一カラムUI（横並びのタブ/カラム不使用）
+- 接続ボタンの反応改善（自動認証初期化 ensure_youtube_service）
+- ペルソナ選択の ValueError: None is not in list を根本修正（safe_idx）
+- ガラス質感 + ヒーローバナー + チャットバブル + BGM/背景（/images, /audio）
 - personas.json ホットリロード & フォールバック
-- ゲームごとの画像・BGM自動切替（/images, /audio）
-- ローカルファイルは data:URI に自動変換
-- KeyError（chat_lock など）を回避する堅牢なセッション初期化
-
-必要ファイル:
-- client_secret.json / token.json
-- personas.json
-- /images/*.jpg, /audio/*.mp3（ユーザー指定のファイル名対応）
+- chat_lock 未初期化対策、スレッド例外でも落ちない
 """
 
 from __future__ import annotations
@@ -51,6 +45,22 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 JST = timezone(timedelta(hours=9), name="JST")
 YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|/live/|/shorts/)([A-Za-z0-9_-]{11})")
 PERSONAS_DEFAULT_PATH = "personas.json"
+
+# ------------------------------------------------------------
+# 汎用安全 index
+# ------------------------------------------------------------
+
+
+def safe_idx(options: List[str], selected: Optional[str], default: int = 0) -> int:
+    if not options:
+        return 0
+    if selected is None:
+        return default
+    try:
+        return options.index(selected)
+    except Exception:
+        return default
+
 
 # ============================================================
 # 画像/音声 ヘルパ
@@ -203,12 +213,12 @@ def get_youtube_service(_creds: Credentials):
     return build("youtube", "v3", credentials=_creds, cache_discovery=False)
 
 
-# 反応しない対策：必要時にサービスを自動初期化
+# 自動初期化（接続ボタンが効かない対策）
 
 
 def ensure_youtube_service() -> bool:
     ss = st.session_state
-    if hasattr(ss, "yt_service") and ss.yt_service is not None:
+    if getattr(ss, "yt_service", None) is not None:
         return True
     try:
         with st.spinner("YouTube サービスを初期化中..."):
@@ -504,38 +514,24 @@ def inject_global_css():
     st.markdown(
         """
         <style>
-        /* Hide default header/footer */
         header[data-testid="stHeader"], footer {visibility: hidden; height: 0;}
-
-        /* Glassy container */
         .block-container { backdrop-filter: blur(6px); }
-
-        /* Buttons */
         .stButton>button {
             background: linear-gradient(135deg, #7C3AED 0%, #06B6D4 100%)!important;
-            color: white!important;
-            border: none!important;
-            border-radius: 14px!important;
-            padding: 0.6rem 1.0rem!important;
-            box-shadow: 0 8px 24px rgba(124,58,237,0.35);
+            color: white!important; border: none!important; border-radius: 14px!important;
+            padding: 0.65rem 1.0rem!important; box-shadow: 0 8px 24px rgba(124,58,237,0.35);
             transition: transform .08s ease, box-shadow .2s ease;
         }
         .stButton>button:hover { transform: translateY(-1px); box-shadow: 0 12px 28px rgba(6,182,212,0.35); }
-
-        /* Metrics (pill style) */
-        [data-testid="stMetric"] { background: rgba(255,255,255,0.08); padding: 10px 12px; border-radius: 14px; }
-
-        /* Chat bubble */
-        .bubble { padding:10px 12px; border-radius:14px; margin-bottom:10px; animation: pop .15s ease-out; }
+        .bubble { padding:10px 12px; border-radius:14px; margin:10px 0; animation: pop .15s ease-out; }
         .bubble.bot { background: rgba(255,255,255,0.08); }
         .bubble.user{ background: rgba(0,0,0,0.15); }
         @keyframes pop { from { transform: scale(.98); opacity:.0;} to {transform: scale(1); opacity:1;} }
-
-        /* Hero banner */
         .hero { position: relative; border-radius: 16px; overflow: hidden; }
         .hero::after{ content:""; position:absolute; inset:0; background: linear-gradient(180deg, rgba(0,0,0,.35), rgba(0,0,0,.65)); }
         .hero h1 { position:absolute; left:16px; bottom:12px; color:#fff; z-index:2; margin:0; }
         .hero small { position:absolute; left:16px; bottom:48px; color:#e5e7eb; z-index:2; }
+        .pill { display:inline-block; padding:6px 10px; margin:4px 6px 0 0; border-radius:12px; background: rgba(255,255,255,0.08); }
         </style>
         """,
         unsafe_allow_html=True,
@@ -556,10 +552,7 @@ def render_background_css(src: str):
     st.markdown(
         f"""
         <style>
-        .stApp {{
-            background-image: url('{url}');
-            background-size: cover; background-position: center center; background-attachment: fixed;
-        }}
+        .stApp {{ background-image: url('{url}'); background-size: cover; background-position: center center; background-attachment: fixed; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -580,7 +573,7 @@ def render_bgm_player(src: str, volume: float):
             return
     st_html(
         f"""
-        <audio id="bgm" src="{url}" autoplay loop></audio>
+        <audio id=\"bgm\" src=\"{url}\" autoplay loop></audio>
         <script>const audio=document.getElementById('bgm'); if(audio) audio.volume={vol};</script>
         """,
         height=0,
@@ -599,8 +592,8 @@ def hero_banner(game_title: str, cover_src: Optional[str]):
             return
     st_html(
         f"""
-        <div class="hero" style="height:200px;">
-            <img src="{url}" style="width:100%; height:100%; object-fit:cover; display:block;"/>
+        <div class=\"hero\" style=\"height:200px;\">
+            <img src=\"{url}\" style=\"width:100%; height:100%; object-fit:cover; display:block;\"/>
             <small>Now Playing</small>
             <h1>🎮 {game_title}</h1>
         </div>
@@ -610,16 +603,15 @@ def hero_banner(game_title: str, cover_src: Optional[str]):
 
 
 def render_chat_log():
-    with st.container(height=440):
-        for row in st.session_state.chat_log[-600:]:
+    with st.container(height=460):
+        for row in st.session_state.chat_log[-800:]:
             ts = row.get("time")
             author = row.get("author")
             text = row.get("text")
             who_cls = "bot" if row.get("bot") else "user"
             icon = "🤖" if row.get("bot") else "🟢"
             st.markdown(
-                f"<div class='bubble {who_cls}'>"
-                f"{icon} <b>{author}</b> <code>[{ts}]</code><br>{text}</div>",
+                f"<div class='bubble {who_cls}'>{icon} <b>{author}</b> <code>[{ts}]</code><br>{text}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -650,148 +642,121 @@ GAME_MEDIA = {
 }
 
 # ============================================================
-# サイドバー
+# メインUI（サイドバー廃止・縦並び）
 # ============================================================
 
 
-def sidebar_controls(personas: List[Persona]):
+def controls_ui(personas: List[Persona]):
     ss = st.session_state
-    with st.sidebar:
-        st.subheader("⚙️ コントロール")
 
-        # 認証/サービス
-        auth_col1, auth_col2 = st.columns([1, 1])
-        if auth_col1.button("🔐 Google 認証", use_container_width=True):
-            ensure_youtube_service()
-        if auth_col2.button("♻️ サービス再生成", use_container_width=True):
-            st.cache_resource.clear()
-            ensure_youtube_service()
+    # 1) 認証・サービス
+    st.subheader("1️⃣ 認証・サービス")
+    if st.button("🔐 Google 認証 / 初期化", use_container_width=True):
+        ensure_youtube_service()
+    if st.button("♻️ サービス再生成", use_container_width=True):
+        st.cache_resource.clear()
+        ensure_youtube_service()
 
-        # 接続
-        st.divider()
-        st.markdown("**🔴 配信に接続**")
-        ss.yt_channel_id = st.text_input(
-            "チャンネルID（ライブ自動検出）", value=ss.yt_channel_id
-        )
-        colA, colB = st.columns([1, 1])
-        with colA:
-            if st.button("📡 ライブ検出して接続", use_container_width=True):
-                if ensure_youtube_service():
-                    with st.spinner("ライブを検索中..."):
-                        vid = search_live_video_id_by_channel(
-                            ss.yt_service, ss.yt_channel_id
-                        )
-                    if not vid:
-                        st.warning(
-                            "ライブ配信が見つかりませんでした。手動接続をご利用ください。"
-                        )
-                    else:
-                        connect_to_video_id(vid)
-        with colB:
-            manual = st.text_input("ライブURL または videoId")
-            if st.button("🔗 手動接続", use_container_width=True):
-                if ensure_youtube_service():
-                    vid = extract_video_id(manual)
-                    if not vid:
-                        st.warning("URL/ID を正しく入力してください")
-                    else:
-                        connect_to_video_id(vid)
+    # 2) 配信に接続
+    st.subheader("2️⃣ 配信に接続")
+    ss.yt_channel_id = st.text_input(
+        "チャンネルID（ライブ自動検出）", value=ss.yt_channel_id
+    )
+    if st.button("📡 ライブ検出して接続", use_container_width=True):
+        if ensure_youtube_service():
+            with st.spinner("ライブを検索中..."):
+                vid = search_live_video_id_by_channel(ss.yt_service, ss.yt_channel_id)
+            if not vid:
+                st.warning(
+                    "ライブ配信が見つかりませんでした。手動接続をご利用ください。"
+                )
+            else:
+                connect_to_video_id(vid)
+    manual = st.text_input("ライブURL または videoId")
+    if st.button("🔗 手動接続", use_container_width=True):
+        if ensure_youtube_service():
+            vid = extract_video_id(manual)
+            if not vid:
+                st.warning("URL/ID を正しく入力してください")
+            else:
+                connect_to_video_id(vid)
 
-        # AI / ペルソナ
-        st.divider()
-        st.markdown("**🤖 AI 応答**")
-        ss.ai_enabled = st.toggle("AI応答を有効化", value=ss.ai_enabled)
-        ppath = Path(ss.personas_path)
-        colR1, colR2 = st.columns([1, 1])
-        if colR1.button("🔄 ペルソナ再読込", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-        ss.personas_path = st.text_input("personas.json パス", value=str(ppath))
+    # 3) AI / ペルソナ
+    st.subheader("3️⃣ AI / ペルソナ")
+    ss.ai_enabled = st.toggle("AI応答を有効化", value=ss.ai_enabled)
+    ppath = Path(ss.personas_path)
+    if st.button("🔄 personas.json を再読込", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+    ss.personas_path = st.text_input("personas.json パス", value=str(ppath))
 
-        persona_names = [p.name for p in personas] or ["デフォルト"]
-        sel_persona = st.selectbox(
-            "ペルソナ",
-            persona_names,
-            index=max(
-                0,
-                persona_names.index(ss.get("selected_persona_name", persona_names[0])),
-            ),
-        )
-        if sel_persona != ss.get("selected_persona_name"):
-            ss.selected_persona_name = sel_persona
-        persona_obj = next(
-            (p for p in personas if p.name == sel_persona),
-            (personas[0] if personas else Persona("デフォルト", [])),
-        )
+    persona_names = [p.name for p in personas] or ["デフォルト"]
+    current_p = ss.get("selected_persona_name") or persona_names[0]
+    sel_persona = st.selectbox(
+        "ペルソナ", persona_names, index=safe_idx(persona_names, current_p)
+    )
+    if sel_persona != ss.get("selected_persona_name"):
+        ss.selected_persona_name = sel_persona
+    persona_obj = next(
+        (p for p in personas if p.name == sel_persona),
+        (personas[0] if personas else Persona("デフォルト", [])),
+    )
 
-        char_names = [c.name for c in persona_obj.characters] or ["キャラ"]
-        sel_char = st.selectbox(
-            "キャラクター",
-            char_names,
-            index=max(
-                0, char_names.index(ss.get("selected_character_name", char_names[0]))
-            ),
-        )
-        if sel_char != ss.get("selected_character_name"):
-            ss.selected_character_name = sel_char
+    char_names = [c.name for c in persona_obj.characters] or ["キャラ"]
+    current_c = ss.get("selected_character_name") or char_names[0]
+    sel_char = st.selectbox(
+        "キャラクター", char_names, index=safe_idx(char_names, current_c)
+    )
+    if sel_char != ss.get("selected_character_name"):
+        ss.selected_character_name = sel_char
 
-        ch = next((c for c in persona_obj.characters if c.name == sel_char), None)
-        if ch is None and persona_obj.characters:
-            ch = persona_obj.characters[0]
-        start_key = (
-            f"start_greet__{persona_obj.name}__{ch.name}"
-            if ch
-            else "start_greet__default"
-        )
-        end_key = (
-            f"end_greet__{persona_obj.name}__{ch.name}" if ch else "end_greet__default"
-        )
-        st.text_area(
-            "開始挨拶（接続時に送信可）",
-            value=(ch.greetings.start if ch else "配信開始のご挨拶です！"),
-            key=start_key,
-            height=80,
-        )
-        st.text_area(
-            "終了挨拶（切断時に送信可）",
-            value=(ch.greetings.end if ch else "本日はありがとうございました！"),
-            key=end_key,
-            height=80,
-        )
-        ss.auto_greet = st.toggle("接続/切断で自動挨拶", value=ss.auto_greet)
+    ch = next((c for c in persona_obj.characters if c.name == sel_char), None)
+    if ch is None and persona_obj.characters:
+        ch = persona_obj.characters[0]
+    start_key = (
+        f"start_greet__{persona_obj.name}__{ch.name}" if ch else "start_greet__default"
+    )
+    end_key = (
+        f"end_greet__{persona_obj.name}__{ch.name}" if ch else "end_greet__default"
+    )
+    st.text_area(
+        "開始挨拶（接続時に送信可）",
+        value=(ch.greetings.start if ch else "配信開始のご挨拶です！"),
+        key=start_key,
+        height=80,
+    )
+    st.text_area(
+        "終了挨拶（切断時に送信可）",
+        value=(ch.greetings.end if ch else "本日はありがとうございました！"),
+        key=end_key,
+        height=80,
+    )
+    ss.auto_greet = st.toggle("接続/切断で自動挨拶", value=ss.auto_greet)
 
-        # ゲーム演出
-        st.divider()
-        st.markdown("**🎮 ゲーム演出**")
-        games = ["なし"] + list(GAME_MEDIA.keys())
-        game_choice = st.selectbox(
-            "ゲームを選択", games, index=games.index(ss.get("selected_game", "なし"))
-        )
-        if game_choice != ss.get("selected_game"):
-            ss.selected_game = game_choice
-        if game_choice != "なし":
-            media = GAME_MEDIA[game_choice]
-            ss.bg_url = media["image"]
-            ss.bgm_url = media["audio"]
-        else:
-            ss.bg_url = st.text_input("背景画像パス/URL", value=ss.bg_url)
-            ss.bgm_url = st.text_input("BGM パス/URL (mp3/m4a/ogg)", value=ss.bgm_url)
-        ss.bgm_volume = st.slider("BGM 音量", 0.0, 1.0, float(ss.bgm_volume), 0.01)
+    # 4) ゲーム演出
+    st.subheader("4️⃣ ゲーム演出")
+    games = ["なし"] + list(GAME_MEDIA.keys())
+    current_g = ss.get("selected_game") or "なし"
+    game_choice = st.selectbox("ゲームを選択", games, index=safe_idx(games, current_g))
+    if game_choice != ss.get("selected_game"):
+        ss.selected_game = game_choice
+    if game_choice != "なし":
+        media = GAME_MEDIA[game_choice]
+        ss.bg_url = media["image"]
+        ss.bgm_url = media["audio"]
+    else:
+        ss.bg_url = st.text_input("背景画像パス/URL", value=ss.bg_url)
+        ss.bgm_url = st.text_input("BGM パス/URL (mp3/m4a/ogg)", value=ss.bgm_url)
+    ss.bgm_volume = st.slider("BGM 音量", 0.0, 1.0, float(ss.bgm_volume), 0.01)
 
-        # 監視
-        st.divider()
-        ctrl1, ctrl2 = st.columns([1, 1])
-        if ctrl1.button(
-            "▶️ 監視開始",
-            use_container_width=True,
-            disabled=not ss.get("yt_live_chat_id"),
-        ):
-            start_watch(st.session_state.get("_personas", []))
-        if ctrl2.button("⏹️ 停止", use_container_width=True):
-            stop_watch(send_goodbye=ss.auto_greet)
-
-        st.divider()
-        st.caption("© YouTubeBOT / Streamlit")
+    # 5) 監視
+    st.subheader("5️⃣ 監視")
+    if st.button(
+        "▶️ 監視開始", use_container_width=True, disabled=not ss.get("yt_live_chat_id")
+    ):
+        start_watch(personas)
+    if st.button("⏹️ 停止", use_container_width=True):
+        stop_watch(send_goodbye=ss.auto_greet)
 
 
 # ============================================================
@@ -917,7 +882,7 @@ def stop_watch(send_goodbye: bool = False):
 
 
 def main():
-    st.set_page_config(page_title="YouTubeBOT", page_icon="📺", layout="wide")
+    st.set_page_config(page_title="YouTubeBOT", page_icon="📺", layout="centered")
     inject_global_css()
     init_session_state()
 
@@ -933,146 +898,115 @@ def main():
             personas[0].characters[0].name if personas[0].characters else "キャラ",
         )
 
-    # 背景/BGM
+    # 背景/BGM + ヒーローバナー
     render_background_css(st.session_state.bg_url)
     render_bgm_player(st.session_state.bgm_url, float(st.session_state.bgm_volume))
-
-    # ヒーローバナー（選択ゲームのカバー）
     game = st.session_state.get("selected_game", "なし")
     cover = GAME_MEDIA.get(game, {}).get("image") if game != "なし" else None
     if cover:
         hero_banner(game, cover)
 
-    # サイドバー
-    sidebar_controls(personas)
+    # コントロール（縦）
+    controls_ui(personas)
 
-    # メイン
-    left, right = st.columns([7, 5])
-    with left:
-        st.subheader("📺 配信ビュー")
-        vid = st.session_state.get("yt_video_id")
-        if vid:
-            st_html(
-                f"""
-                <div style='position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:14px;'>
-                    <iframe src="https://www.youtube.com/embed/{vid}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen style='position:absolute;top:0;left:0;width:100%;height:100%'></iframe>
-                </div>
-                """,
-                height=360,
-            )
-            st.markdown(f"[🔗 YouTube で開く](https://www.youtube.com/watch?v={vid})")
-        else:
-            st.info("未接続です。チャンネル自動検出または手動接続を行ってください。")
+    # ステータス
+    st.subheader("🧭 ステータス")
+    st.markdown(
+        f"<span class='pill'>接続: {'✅' if st.session_state.get('yt_connected') else '❌'}</span>"
+        f"<span class='pill'>AI: {'ON' if st.session_state.get('ai_enabled') else 'OFF'}</span>"
+        f"<span class='pill'>監視: {'RUN' if (st.session_state.get('watcher_thread') and st.session_state.get('watcher_thread').is_alive()) else 'STOP'}</span>"
+        f"<span class='pill'>ゲーム: {st.session_state.get('selected_game','なし')}</span>",
+        unsafe_allow_html=True,
+    )
 
-        st.markdown("### 💬 チャット送信")
-        msg = st.text_input("メッセージ", key="ui_send_text")
-        colS1, colS2, colS3 = st.columns([1, 1, 1])
-        if colS1.button(
-            "📤 送信",
-            use_container_width=True,
-            disabled=not st.session_state.get("yt_live_chat_id"),
-        ):
-            ok = send_chat_message(
-                st.session_state.yt_service, st.session_state.yt_live_chat_id, msg
-            )
-            append_chat(
-                {
-                    "time": datetime.now(JST).isoformat(),
-                    "author": "Bot",
-                    "text": msg,
-                    "owner": True,
-                    "bot": True,
-                    "sent": ok,
-                }
-            )
-        if colS2.button(
-            "🙏 定型: 開始挨拶",
-            use_container_width=True,
-            disabled=not st.session_state.get("yt_live_chat_id"),
-        ):
-            p, c = current_persona_and_character()
-            key = (
-                f"start_greet__{p.name}__{c.name}"
-                if (p and c)
-                else "start_greet__default"
-            )
-            text = st.session_state.get(key) or (
-                c.greetings.start if c else "配信へようこそ！"
-            )
-            ok = send_chat_message(
-                st.session_state.yt_service, st.session_state.yt_live_chat_id, text
-            )
-            append_chat(
-                {
-                    "time": datetime.now(JST).isoformat(),
-                    "author": "Bot",
-                    "text": text,
-                    "owner": True,
-                    "bot": True,
-                    "sent": ok,
-                }
-            )
-        if colS3.button(
-            "🙇 定型: 終了挨拶",
-            use_container_width=True,
-            disabled=not st.session_state.get("yt_live_chat_id"),
-        ):
-            p, c = current_persona_and_character()
-            key = (
-                f"end_greet__{p.name}__{c.name}" if (p and c) else "end_greet__default"
-            )
-            text = st.session_state.get(key) or (
-                c.greetings.end if c else "ご視聴ありがとうございました！"
-            )
-            ok = send_chat_message(
-                st.session_state.yt_service, st.session_state.yt_live_chat_id, text
-            )
-            append_chat(
-                {
-                    "time": datetime.now(JST).isoformat(),
-                    "author": "Bot",
-                    "text": text,
-                    "owner": True,
-                    "bot": True,
-                    "sent": ok,
-                }
-            )
-
-    with right:
-        st.subheader("🧭 ステータス")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("接続", "✅" if st.session_state.get("yt_connected") else "❌")
-        c2.metric("AI", "ON" if st.session_state.get("ai_enabled") else "OFF")
-        c3.metric(
-            "監視",
-            (
-                "RUN"
-                if (
-                    st.session_state.get("watcher_thread")
-                    and st.session_state.get("watcher_thread").is_alive()
-                )
-                else "STOP"
-            ),
+    # 配信ビュー
+    st.subheader("📺 配信ビュー")
+    vid = st.session_state.get("yt_video_id")
+    if vid:
+        st_html(
+            f"""
+            <div style='position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:14px;'>
+                <iframe src="https://www.youtube.com/embed/{vid}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen style='position:absolute;top:0;left:0;width:100%;height:100%'></iframe>
+            </div>
+            """,
+            height=360,
         )
-        c4.metric("ゲーム", st.session_state.get("selected_game", "なし"))
+        st.markdown(f"[🔗 YouTube で開く](https://www.youtube.com/watch?v={vid})")
+    else:
+        st.info("未接続です。チャンネル自動検出または手動接続を行ってください。")
 
-        st.code(
-            json.dumps(
-                {
-                    "video_id": st.session_state.get("yt_video_id"),
-                    "live_chat_id": st.session_state.get("yt_live_chat_id"),
-                    "channel_id": st.session_state.get("yt_channel_id"),
-                    "persona": st.session_state.get("selected_persona_name"),
-                    "character": st.session_state.get("selected_character_name"),
-                    "game": st.session_state.get("selected_game"),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+    # 送信 & ログ
+    st.subheader("💬 チャット送信")
+    msg = st.text_input("メッセージ", key="ui_send_text")
+    if st.button(
+        "📤 送信",
+        use_container_width=True,
+        disabled=not st.session_state.get("yt_live_chat_id"),
+    ):
+        ok = send_chat_message(
+            st.session_state.yt_service, st.session_state.yt_live_chat_id, msg
+        )
+        append_chat(
+            {
+                "time": datetime.now(JST).isoformat(),
+                "author": "Bot",
+                "text": msg,
+                "owner": True,
+                "bot": True,
+                "sent": ok,
+            }
+        )
+    if st.button(
+        "🙏 定型: 開始挨拶",
+        use_container_width=True,
+        disabled=not st.session_state.get("yt_live_chat_id"),
+    ):
+        p, c = current_persona_and_character()
+        key = (
+            f"start_greet__{p.name}__{c.name}" if (p and c) else "start_greet__default"
+        )
+        text = st.session_state.get(key) or (
+            c.greetings.start if c else "配信へようこそ！"
+        )
+        ok = send_chat_message(
+            st.session_state.yt_service, st.session_state.yt_live_chat_id, text
+        )
+        append_chat(
+            {
+                "time": datetime.now(JST).isoformat(),
+                "author": "Bot",
+                "text": text,
+                "owner": True,
+                "bot": True,
+                "sent": ok,
+            }
+        )
+    if st.button(
+        "🙇 定型: 終了挨拶",
+        use_container_width=True,
+        disabled=not st.session_state.get("yt_live_chat_id"),
+    ):
+        p, c = current_persona_and_character()
+        key = f"end_greet__{p.name}__{c.name}" if (p and c) else "end_greet__default"
+        text = st.session_state.get(key) or (
+            c.greetings.end if c else "ご視聴ありがとうございました！"
+        )
+        ok = send_chat_message(
+            st.session_state.yt_service, st.session_state.yt_live_chat_id, text
+        )
+        append_chat(
+            {
+                "time": datetime.now(JST).isoformat(),
+                "author": "Bot",
+                "text": text,
+                "owner": True,
+                "bot": True,
+                "sent": ok,
+            }
         )
 
-        st.markdown("### 📜 チャットログ")
-        render_chat_log()
+    st.subheader("📜 チャットログ")
+    render_chat_log()
 
 
 # ============================================================
