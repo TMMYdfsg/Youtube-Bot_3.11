@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-YouTube Live Bot (Streamlit) – Mobile First + Persona Editor (Full)
+YouTube Live Bot (Streamlit) – Mobile First + Persona Editor (Full, Mobile OAuth-friendly)
 - スマホ向けミニマル&おしゃれUI（単一カラム / ガラス質感 / ヒーローバナー / チャットバブル）
 - YouTube連携：認証→ライブ自動検出→手動接続→監視→送信→自動挨拶
 - Gemini連携：AI自動返信（50文字以内）/ ON-OFF / ペルソナ切替
 - ゲーム演出：背景画像& BGM 自動切替（/images, /audio）＋音量調整
 - ペルソナ管理：既定 personas.json を読み込み、**追加・編集・削除** をWeb UIで実行＆保存
+- 認証改善：**スマホからでもOK**なクライアントシークレット投入（アップロード or 貼り付け）とトークン管理
 - 安定化：@st.cache_resource / @st.cache_data、threading.Event、chat_lock、例外時の復旧
 """
 
@@ -211,39 +212,103 @@ def personas_to_raw(personas: List[Persona]) -> Dict[str, Any]:
 
 
 # ============================================================
-# YouTube 認証/サービス
+# 認証 – client_secret 入力UI & 認証/トークン管理
 # ============================================================
 
 
-def ensure_client_secret_ui() -> bool:
-    secret_path = Path("client_secret.json")
-    if secret_path.exists():
-        return True
-    st.warning("client_secret.json が見つかりません。下でアップロードしてください。")
-    up = st.file_uploader(
-        "client_secret.json をアップロード", type=["json"], key="up_client_secret"
+def client_secret_setup_card():
+    """スマホでも使えるクライアントシークレット投入UI（アップロード/貼り付け/保存）。"""
+    ss = st.session_state
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown(
+        "**Google OAuth 設定** – `client_secret.json` がない場合は、ここで **アップロード** するか **中身を貼り付け** て保存してください。"
     )
-    if up is not None:
-        secret_path.write_bytes(up.read())
-        st.success("client_secret.json を保存しました。もう一度 認証 を実行できます。")
-        return True
-    return False
+
+    c1, c2 = st.columns(2)
+    with c1:
+        up = st.file_uploader(
+            "client_secret.json をアップロード", type=["json"], key="up_client_secret"
+        )
+        if up is not None:
+            try:
+                content = up.read().decode("utf-8")
+                json.loads(content)  # バリデーション
+                ss.client_secret_json = content
+                Path("client_secret.json").write_text(content, encoding="utf-8")
+                st.success(
+                    "client_secret.json を保存しました。認証ボタンから続行できます。"
+                )
+            except Exception as e:
+                st.error(f"JSONとして読み込めません: {e}")
+    with c2:
+        txt = st.text_area(
+            "client_secret.json を貼り付け",
+            value=ss.get("client_secret_json", ""),
+            height=140,
+        )
+        if st.button("💾 貼り付け内容を保存", use_container_width=True):
+            try:
+                json.loads(txt)
+                ss.client_secret_json = txt
+                Path("client_secret.json").write_text(txt, encoding="utf-8")
+                st.success(
+                    "client_secret.json を保存しました。認証ボタンから続行できます。"
+                )
+            except Exception as e:
+                st.error(f"JSONとして読み込めません: {e}")
+
+    cols = st.columns(2)
+    with cols[0]:
+        if st.button("🧹 認証トークンを削除 (token.json)", use_container_width=True):
+            try:
+                Path("token.json").unlink(missing_ok=True)
+                st.success("token.json を削除しました（次回は再認証が必要）。")
+            except Exception as e:
+                st.error(f"削除に失敗: {e}")
+    with cols[1]:
+        st.caption(
+            "*認証はデスクトップで行うのが最も安定します。スマホのみの場合は上のアップロードで事前に設定し、認証ボタンを実行してください。*"
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def get_credentials() -> Credentials:
+    ss = st.session_state
     creds: Optional[Credentials] = None
     token_path = Path("token.json")
+
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            if not ensure_client_secret_ui():
+            # client_secret をメモリ/ファイルのどちらからでも使えるように
+            cfg = None
+            if ss.get("client_secret_json"):
+                try:
+                    cfg = json.loads(ss.client_secret_json)
+                except Exception:
+                    cfg = None
+            secret_path = Path("client_secret.json")
+            if cfg is None and not secret_path.exists():
+                # 事前セットアップ UI を出して明示
+                st.error(
+                    "client_secret.json が見つかりません。下のカードでアップロード/貼り付けしてから、再度 認証 を押してください。"
+                )
                 raise FileNotFoundError("client_secret.json not found")
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "client_secret.json", SCOPES
-            )
+
+            if cfg is not None:
+                flow = InstalledAppFlow.from_client_config(cfg, SCOPES)
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    str(secret_path), SCOPES
+                )
+
+            # モバイルからでも進めやすいよう、標準のローカルサーバーフローを採用。
+            # デプロイ環境によってはデスクトップでの実行が必要になる点に注意。
             creds = flow.run_local_server(port=0)
         token_path.write_text(creds.to_json(), encoding="utf-8")
     return creds
@@ -532,6 +597,8 @@ def init_session_state():
         # Persona Editor work buffer
         "personas_edit": None,
         "persona_editor_open": False,
+        # OAuth client secret JSON content (optional in-memory)
+        "client_secret_json": None,
     }
     for k, v in defaults.items():
         if k not in ss:
@@ -878,6 +945,9 @@ def persona_editor_ui(
 def controls_ui(personas: List[Persona], raw_loaded: Dict[str, Any]):
     ss = st.session_state
 
+    # 0) OAuth 事前セットアップ（常時表示）
+    client_secret_setup_card()
+
     # 1) 認証・サービス
     st.subheader("1️⃣ 認証・サービス")
     if st.button("🔐 Google 認証 / 初期化", use_container_width=True):
@@ -1139,7 +1209,8 @@ def main():
         st.session_state.setdefault("selected_character_name", first_char)
 
     # 背景/BGM + ヒーローバナー
-    render_background_css(st.session_state.bg_url)
+    render_background_css(st.session_state.bgm_url and st.session_state.bg_url)
+    render_background_css(st.session_state.bg_url)  # 再適用
     render_bgm_player(st.session_state.bgm_url, float(st.session_state.bgm_volume))
     game = st.session_state.get("selected_game", "なし")
     cover = GAME_MEDIA.get(game, {}).get("image") if game != "なし" else None
@@ -1166,7 +1237,7 @@ def main():
         st_html(
             f"""
             <div style='position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:14px;'>
-                <iframe src="https://www.youtube.com/embed/{vid}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen style='position:absolute;top:0;left:0;width:100%;height:100%'></iframe>
+                <iframe src=\"https://www.youtube.com/embed/{vid}\" frameborder=\"0\" allow=\"autoplay; encrypted-media\" allowfullscreen style='position:absolute;top:0;left:0;width:100%;height:100%'></iframe>
             </div>
             """,
             height=360,
