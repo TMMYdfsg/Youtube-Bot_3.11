@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-YouTube Live Bot (Streamlit) – Mobile First + Persona Editor (Full, Mobile OAuth-friendly)
-- スマホ向けミニマル&おしゃれUI（単一カラム / ガラス質感 / ヒーローバナー / チャットバブル）
+YouTube Live Bot (Streamlit)
+Mobile First + Persona Editor + Mobile OAuth-friendly
+
+- スマホ向けミニマルUI（単一カラム / ガラス質感 / ヒーローバナー / チャットバブル）
 - YouTube連携：認証→ライブ自動検出→手動接続→監視→送信→自動挨拶
 - Gemini連携：AI自動返信（50文字以内）/ ON-OFF / ペルソナ切替
-- ゲーム演出：背景画像& BGM 自動切替（/images, /audio）＋音量調整
-- ペルソナ管理：既定 personas.json を読み込み、**追加・編集・削除** をWeb UIで実行＆保存
-- 認証改善：**スマホからでもOK**なクライアントシークレット投入（アップロード or 貼り付け）とトークン管理
+- 演出：ゲーム選択で背景画像 & BGM 自動切替（/images, /audio）＋音量調整
+- ペルソナ管理：既定 personas.json を読み込み、追加・編集・削除をWeb UIで実行＆保存
+- 認証改善：スマホでもOKな client_secret.json アップロード/貼付保存＋手動OAuthフォールバック
 - 安定化：@st.cache_resource / @st.cache_data、threading.Event、chat_lock、例外時の復旧
 """
 
@@ -49,12 +51,9 @@ JST = timezone(timedelta(hours=9), name="JST")
 YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|/live/|/shorts/)([A-Za-z0-9_-]{11})")
 PERSONAS_DEFAULT_PATH = "personas.json"
 
-# ------------------------------------------------------------
-# 汎用安全 index
-# ------------------------------------------------------------
-
 
 def safe_idx(options: List[str], selected: Optional[str], default: int = 0) -> int:
+    """selectbox の None/未一致で落ちない安全 index"""
     if not options:
         return 0
     if selected is None:
@@ -63,11 +62,6 @@ def safe_idx(options: List[str], selected: Optional[str], default: int = 0) -> i
         return options.index(selected)
     except Exception:
         return default
-
-
-# ============================================================
-# 画像/音声 ヘルパ
-# ============================================================
 
 
 def is_url(path_or_url: str) -> bool:
@@ -192,36 +186,16 @@ def normalize_personas(raw: Dict[str, Any]) -> List[Persona]:
     return personas
 
 
-def personas_to_raw(personas: List[Persona]) -> Dict[str, Any]:
-    data = {"personas": []}
-    for p in personas:
-        entry = {"name": p.name, "characters": []}
-        for c in p.characters:
-            entry["characters"].append(
-                {
-                    "name": c.name,
-                    "greetings": {
-                        "start": c.greetings.start,
-                        "end": c.greetings.end,
-                        "replies": c.greetings.replies or [],
-                    },
-                }
-            )
-        data["personas"].append(entry)
-    return data
-
-
 # ============================================================
 # 認証 – client_secret 入力UI & 認証/トークン管理
 # ============================================================
-
-
 def client_secret_setup_card():
     """スマホでも使えるクライアントシークレット投入UI（アップロード/貼り付け/保存）。"""
     ss = st.session_state
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown(
-        "**Google OAuth 設定** – `client_secret.json` がない場合は、ここで **アップロード** するか **中身を貼り付け** て保存してください。"
+        "**Google OAuth 設定** – `client_secret.json` がない場合は、ここで **アップロード** するか "
+        "**中身を貼り付け** て保存してください。"
     )
 
     c1, c2 = st.columns(2)
@@ -296,7 +270,7 @@ def get_credentials() -> Credentials:
             if cfg is None and not secret_path.exists():
                 # 事前セットアップ UI を出して明示
                 st.error(
-                    "client_secret.json が見つかりません。下のカードでアップロード/貼り付けしてから、再度 認証 を押してください。"
+                    "client_secret.json が見つかりません。上部カードでアップロード/貼り付けしてから、再度 認証 を押してください。"
                 )
                 raise FileNotFoundError("client_secret.json not found")
 
@@ -307,9 +281,37 @@ def get_credentials() -> Credentials:
                     str(secret_path), SCOPES
                 )
 
-            # モバイルからでも進めやすいよう、標準のローカルサーバーフローを採用。
-            # デプロイ環境によってはデスクトップでの実行が必要になる点に注意。
-            creds = flow.run_local_server(port=0)
+            # まず通常フロー（自動で既定ブラウザを開く）を試す
+            try:
+                creds = flow.run_local_server(port=0, open_browser=True)
+            except Exception as e:
+                # フォールバック：手動でリンク→リダイレクトURLを貼り付け
+                st.warning(
+                    "自動でブラウザを開けませんでした。\n\n"
+                    "【手順】1) 下のリンクで認証ページを開く → 2) ログイン/許可 → "
+                    "3) リダイレクト後のURL（http://localhost:ポート?code=... を含む全文）を貼り付け → 4) 認証を完了"
+                )
+                auth_url, _ = flow.authorization_url(
+                    access_type="offline",
+                    include_granted_scopes="true",
+                    prompt="consent",
+                )
+                st.markdown(f"[🔓 Googleで認証ページを開く]({auth_url})")
+                redirect_full = st.text_input(
+                    "リダイレクト後のURL（http://localhost:ポート で始まる全文）",
+                    key="oauth_redirect_url",
+                )
+                if st.button(
+                    "✅ 認証を完了", key="btn_complete_oauth", use_container_width=True
+                ):
+                    try:
+                        flow.fetch_token(authorization_response=redirect_full)
+                        creds = flow.credentials
+                    except Exception as ee:
+                        st.error(f"トークン取得に失敗しました: {ee}")
+                        st.stop()
+                else:
+                    st.stop()  # 入力待ち
         token_path.write_text(creds.to_json(), encoding="utf-8")
     return creds
 
@@ -337,8 +339,6 @@ def ensure_youtube_service() -> bool:
 # ============================================================
 # YouTube API 小物
 # ============================================================
-
-
 def search_live_video_id_by_channel(youtube, channel_id: str) -> Optional[str]:
     try:
         resp = (
@@ -404,8 +404,6 @@ def send_chat_message(youtube, live_chat_id: str, text: str) -> bool:
 # ============================================================
 # Gemini 応答
 # ============================================================
-
-
 def setup_gemini(api_key: str) -> Optional[Any]:
     if not genai:
         st.warning(
@@ -568,8 +566,6 @@ class ChatWatcher:
 # ============================================================
 # セッション & チャット管理
 # ============================================================
-
-
 def init_session_state():
     ss = st.session_state
     defaults = {
@@ -616,8 +612,6 @@ def append_chat(row: Dict[str, Any]):
 # ============================================================
 # UI（スタイル + コンポーネント）
 # ============================================================
-
-
 def inject_global_css():
     st.markdown(
         """
@@ -685,7 +679,7 @@ def render_bgm_player(src: str, volume: float):
             return
     st_html(
         f"""
-        <audio id=\"bgm\" src=\"{url}\" autoplay loop></audio>
+        <audio id="bgm" src="{url}" autoplay loop></audio>
         <script>const audio=document.getElementById('bgm'); if(audio) audio.volume={vol};</script>
         """,
         height=0,
@@ -704,8 +698,8 @@ def hero_banner(game_title: str, cover_src: Optional[str]):
             return
     st_html(
         f"""
-        <div class=\"hero\" style=\"height:200px;\">
-            <img src=\"{url}\" style=\"width:100%; height:100%; object-fit:cover; display:block;\"/>
+        <div class="hero" style="height:200px;">
+            <img src="{url}" style="width:100%; height:100%; object-fit:cover; display:block;"/>
             <small>Now Playing</small>
             <h1>🎮 {game_title}</h1>
         </div>
@@ -723,7 +717,8 @@ def render_chat_log():
             who_cls = "bot" if row.get("bot") else "user"
             icon = "🤖" if row.get("bot") else "🟢"
             st.markdown(
-                f"<div class='bubble {who_cls}'>{icon} <b>{author}</b> <code>[{ts}]</code><br>{text}</div>",
+                f"<div class='bubble {who_cls}'>{icon} <b>{author}</b> "
+                f"<code>[{ts}]</code><br>{text}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -753,11 +748,10 @@ GAME_MEDIA = {
     "鳴潮": {"image": "images/鳴潮.jpg", "audio": "audio/鳴潮.mp3"},
 }
 
+
 # ============================================================
 # ペルソナ編集 UI
 # ============================================================
-
-
 def ensure_edit_buffer(raw: Dict[str, Any]):
     ss = st.session_state
     if ss.personas_edit is None:
@@ -876,7 +870,7 @@ def persona_editor_ui(
                 with cols[0]:
                     if st.button("🗑️ このキャラを削除", key=f"btn_del_char_{pi}_{ci}"):
                         p.get("characters", []).pop(ci)
-                        st.experimental_rerun()
+                        st.rerun()
                 with cols[1]:
                     st.caption("")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -884,7 +878,7 @@ def persona_editor_ui(
             # ペルソナ削除
             if st.button("🗑️ このペルソナを削除", key=f"btn_del_persona_{pi}"):
                 personas_list.pop(pi)
-                st.experimental_rerun()
+                st.rerun()
 
     # 保存 / リセット / エクスポート / インポート
     cols = st.columns(2)
@@ -940,8 +934,6 @@ def persona_editor_ui(
 # ============================================================
 # メインコントロール（サイドバー廃止・縦並び）
 # ============================================================
-
-
 def controls_ui(personas: List[Persona], raw_loaded: Dict[str, Any]):
     ss = st.session_state
 
@@ -1070,8 +1062,6 @@ def controls_ui(personas: List[Persona], raw_loaded: Dict[str, Any]):
 # ============================================================
 # 接続/監視
 # ============================================================
-
-
 def connect_to_video_id(video_id: str):
     ss = st.session_state
     if not ensure_youtube_service():
@@ -1187,8 +1177,6 @@ def stop_watch(send_goodbye: bool = False):
 # ============================================================
 # メイン
 # ============================================================
-
-
 def main():
     st.set_page_config(page_title="YouTubeBOT", page_icon="📺", layout="centered")
     inject_global_css()
@@ -1209,8 +1197,7 @@ def main():
         st.session_state.setdefault("selected_character_name", first_char)
 
     # 背景/BGM + ヒーローバナー
-    render_background_css(st.session_state.bgm_url and st.session_state.bg_url)
-    render_background_css(st.session_state.bg_url)  # 再適用
+    render_background_css(st.session_state.bg_url)
     render_bgm_player(st.session_state.bgm_url, float(st.session_state.bgm_volume))
     game = st.session_state.get("selected_game", "なし")
     cover = GAME_MEDIA.get(game, {}).get("image") if game != "なし" else None
@@ -1237,7 +1224,7 @@ def main():
         st_html(
             f"""
             <div style='position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:14px;'>
-                <iframe src=\"https://www.youtube.com/embed/{vid}\" frameborder=\"0\" allow=\"autoplay; encrypted-media\" allowfullscreen style='position:absolute;top:0;left:0;width:100%;height:100%'></iframe>
+                <iframe src="https://www.youtube.com/embed/{vid}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen style='position:absolute;top:0;left:0;width:100%;height:100%'></iframe>
             </div>
             """,
             height=360,
