@@ -1,7 +1,8 @@
 streamlit
 google-api-python-client
+google-auth
 google-auth-oauthlib
 google-auth-httplib2
-python-dotenv
 google-generativeai
-python-dotenv
+httplib2shim
+certifi

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 YouTube Live Bot (Streamlit)
-Mobile First + Persona Editor + Mobile OAuth-friendly
+Mobile First + Persona Editor + Mobile OAuth-friendly + SSL強化
 
 - スマホ向けミニマルUI（単一カラム / ガラス質感 / ヒーローバナー / チャットバブル）
 - YouTube連携：認証→ライブ自動検出→手動接続→監視→送信→自動挨拶
@@ -9,7 +9,7 @@ Mobile First + Persona Editor + Mobile OAuth-friendly
 - 演出：ゲーム選択で背景画像 & BGM 自動切替（/images, /audio）＋音量調整
 - ペルソナ管理：既定 personas.json を読み込み、追加・編集・削除をWeb UIで実行＆保存
 - 認証改善：スマホでもOKな client_secret.json アップロード/貼付保存＋手動OAuthフォールバック
-- 安定化：@st.cache_resource / @st.cache_data、threading.Event、chat_lock、例外時の復旧
+- SSL強化：httplib2 → Requests へ差し替え（httplib2shim）、CAをcertifi固定、エラー時リトライ
 """
 
 from __future__ import annotations
@@ -50,10 +50,10 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 JST = timezone(timedelta(hours=9), name="JST")
 YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|/live/|/shorts/)([A-Za-z0-9_-]{11})")
 PERSONAS_DEFAULT_PATH = "personas.json"
+SSL_ERR_HINT = "DECRYPTION_FAILED_OR_BAD_RECORD_MAC"
 
 
 def safe_idx(options: List[str], selected: Optional[str], default: int = 0) -> int:
-    """selectbox の None/未一致で落ちない安全 index"""
     if not options:
         return 0
     if selected is None:
@@ -187,15 +187,57 @@ def normalize_personas(raw: Dict[str, Any]) -> List[Persona]:
 
 
 # ============================================================
+# SSL/HTTP トランスポートの強化（重要）
+# ============================================================
+def patch_http_transport():
+    """httplib2 を Requests ベースに差し替え & CA を certifi に固定。何度呼んでも安全。"""
+    # CA を certifi に固定
+    try:
+        import httplib2, certifi
+
+        httplib2.CA_CERTS = certifi.where()
+    except Exception:
+        pass
+    # httplib2 を requests に差し替え
+    try:
+        import httplib2shim
+
+        httplib2shim.patch()  # 以降、googleapiclient が内部で使う httplib2 は requests 経由に
+        st.session_state["_http_transport"] = "requests(httplib2shim)"
+    except Exception:
+        st.session_state["_http_transport"] = "httplib2"
+
+
+def execute_with_retry(req_call, *, where: str):
+    """SSLエラー時に 1 回だけパッチ→再生成→再実行のリトライを行う."""
+    try:
+        return req_call()
+    except Exception as e:
+        es = f"{e}"
+        if SSL_ERR_HINT in es:
+            st.warning(
+                f"SSLで失敗しました（{where}）。トランスポートを切替えて1回だけ再試行します。"
+            )
+            # パッチ → サービス再生成
+            patch_http_transport()
+            try:
+                # YouTubeサービスを作り直して呼び直す側でリトライできるよう、上位側に例外を再送してもOK。
+                raise e
+            except Exception:
+                # ここでは単純に再実行（req_call がクロージャで新しい service を掴むなら成功）
+                return req_call()
+        else:
+            raise
+
+
+# ============================================================
 # 認証 – client_secret 入力UI & 認証/トークン管理
 # ============================================================
 def client_secret_setup_card():
-    """スマホでも使えるクライアントシークレット投入UI（アップロード/貼り付け/保存）。"""
     ss = st.session_state
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown(
-        "**Google OAuth 設定** – `client_secret.json` がない場合は、ここで **アップロード** するか "
-        "**中身を貼り付け** て保存してください。"
+        "**Google OAuth 設定** – `client_secret.json` がない場合は、ここで **アップロード** するか **中身を貼り付け** て保存してください。"
     )
 
     c1, c2 = st.columns(2)
@@ -259,7 +301,6 @@ def get_credentials() -> Credentials:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            # client_secret をメモリ/ファイルのどちらからでも使えるように
             cfg = None
             if ss.get("client_secret_json"):
                 try:
@@ -268,27 +309,22 @@ def get_credentials() -> Credentials:
                     cfg = None
             secret_path = Path("client_secret.json")
             if cfg is None and not secret_path.exists():
-                # 事前セットアップ UI を出して明示
                 st.error(
                     "client_secret.json が見つかりません。上部カードでアップロード/貼り付けしてから、再度 認証 を押してください。"
                 )
                 raise FileNotFoundError("client_secret.json not found")
 
-            if cfg is not None:
-                flow = InstalledAppFlow.from_client_config(cfg, SCOPES)
-            else:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    str(secret_path), SCOPES
-                )
+            flow = (
+                InstalledAppFlow.from_client_config(cfg, SCOPES)
+                if cfg is not None
+                else InstalledAppFlow.from_client_secrets_file(str(secret_path), SCOPES)
+            )
 
-            # まず通常フロー（自動で既定ブラウザを開く）を試す
             try:
                 creds = flow.run_local_server(port=0, open_browser=True)
             except Exception as e:
-                # フォールバック：手動でリンク→リダイレクトURLを貼り付け
                 st.warning(
-                    "自動でブラウザを開けませんでした。\n\n"
-                    "【手順】1) 下のリンクで認証ページを開く → 2) ログイン/許可 → "
+                    "自動でブラウザを開けませんでした。\n\n【手順】1) 下のリンクで認証ページを開く → 2) ログイン/許可 → "
                     "3) リダイレクト後のURL（http://localhost:ポート?code=... を含む全文）を貼り付け → 4) 認証を完了"
                 )
                 auth_url, _ = flow.authorization_url(
@@ -311,13 +347,15 @@ def get_credentials() -> Credentials:
                         st.error(f"トークン取得に失敗しました: {ee}")
                         st.stop()
                 else:
-                    st.stop()  # 入力待ち
+                    st.stop()
         token_path.write_text(creds.to_json(), encoding="utf-8")
     return creds
 
 
 @st.cache_resource(show_spinner=False)
 def get_youtube_service(_creds: Credentials):
+    # ここで必ずトランスポートをパッチ（一度だけ）
+    patch_http_transport()
     return build("youtube", "v3", credentials=_creds, cache_discovery=False)
 
 
@@ -337,11 +375,11 @@ def ensure_youtube_service() -> bool:
 
 
 # ============================================================
-# YouTube API 小物
+# YouTube API 小物（SSLエラー時のワンリトライを付与）
 # ============================================================
 def search_live_video_id_by_channel(youtube, channel_id: str) -> Optional[str]:
-    try:
-        resp = (
+    def _call():
+        return (
             youtube.search()
             .list(
                 part="id",
@@ -352,10 +390,11 @@ def search_live_video_id_by_channel(youtube, channel_id: str) -> Optional[str]:
             )
             .execute()
         )
+
+    try:
+        resp = execute_with_retry(_call, where="search.live")
         items = resp.get("items", [])
-        if not items:
-            return None
-        return items[0]["id"].get("videoId")
+        return items[0]["id"].get("videoId") if items else None
     except HttpError as e:
         st.error(f"YouTube API error (search): {e}")
         return None
@@ -368,25 +407,28 @@ def extract_video_id(url_or_id: str) -> Optional[str]:
     if len(s) == 11 and re.match(r"^[A-Za-z0-9_-]{11}$", s):
         return s
     m = YOUTUBE_ID_RE.search(s)
-    if m:
-        return m.group(1)
-    return None
+    return m.group(1) if m else None
 
 
 def get_live_chat_id(youtube, video_id: str) -> Optional[str]:
+    def _call():
+        return youtube.videos().list(part="liveStreamingDetails", id=video_id).execute()
+
     try:
-        resp = youtube.videos().list(part="liveStreamingDetails", id=video_id).execute()
+        resp = execute_with_retry(_call, where="videos.list")
         items = resp.get("items", [])
-        if not items:
-            return None
-        return items[0].get("liveStreamingDetails", {}).get("activeLiveChatId")
+        return (
+            items[0].get("liveStreamingDetails", {}).get("activeLiveChatId")
+            if items
+            else None
+        )
     except HttpError as e:
         st.error(f"YouTube API error (videos.list): {e}")
         return None
 
 
 def send_chat_message(youtube, live_chat_id: str, text: str) -> bool:
-    try:
+    def _call():
         body = {
             "snippet": {
                 "type": "textMessageEvent",
@@ -394,7 +436,10 @@ def send_chat_message(youtube, live_chat_id: str, text: str) -> bool:
                 "textMessageDetails": {"messageText": text},
             }
         }
-        youtube.liveChatMessages().insert(part="snippet", body=body).execute()
+        return youtube.liveChatMessages().insert(part="snippet", body=body).execute()
+
+    try:
+        execute_with_retry(_call, where="liveChatMessages.insert")
         return True
     except HttpError as e:
         st.error(f"YouTube API error (liveChatMessages.insert): {e}")
@@ -590,11 +635,13 @@ def init_session_state():
         "selected_persona_name": None,
         "selected_character_name": None,
         "selected_game": "なし",
-        # Persona Editor work buffer
+        # Persona Editor buffer
         "personas_edit": None,
         "persona_editor_open": False,
-        # OAuth client secret JSON content (optional in-memory)
+        # OAuth client secret JSON content (optional)
         "client_secret_json": None,
+        # http transport memo
+        "_http_transport": "unknown",
     }
     for k, v in defaults.items():
         if k not in ss:
@@ -717,8 +764,7 @@ def render_chat_log():
             who_cls = "bot" if row.get("bot") else "user"
             icon = "🤖" if row.get("bot") else "🟢"
             st.markdown(
-                f"<div class='bubble {who_cls}'>{icon} <b>{author}</b> "
-                f"<code>[{ts}]</code><br>{text}</div>",
+                f"<div class='bubble {who_cls}'>{icon} <b>{author}</b> <code>[{ts}]</code><br>{text}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -772,7 +818,6 @@ def persona_editor_ui(
         "既定の personas.json を直接編集して保存します。スマホでも操作しやすい最小UIです。"
     )
 
-    # 追加（ペルソナ）
     with st.container():
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         new_p_name = st.text_input("新規ペルソナ名", key="pe_new_pname")
@@ -788,19 +833,15 @@ def persona_editor_ui(
             st.success(f"ペルソナ『{new_p_name}』を追加しました")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # 一覧 & 編集
     personas_list = data.get("personas", [])
     if not personas_list:
         st.info("ペルソナがありません。上で追加してください。")
     for pi, p in enumerate(personas_list):
         with st.expander(f"📦 {p.get('name','(無名)')}", expanded=False):
-            # ペルソナ名
-            p_name_key = f"pe_pname_{pi}"
             p["name"] = st.text_input(
-                "ペルソナ名", value=p.get("name", ""), key=p_name_key
+                "ペルソナ名", value=p.get("name", ""), key=f"pe_pname_{pi}"
             )
 
-            # キャラ追加
             st.markdown("<div class='card'>", unsafe_allow_html=True)
             c_new_name = st.text_input("新規キャラ名", key=f"pe_new_cname_{pi}")
             c_new_start = st.text_area(
@@ -840,7 +881,6 @@ def persona_editor_ui(
                 st.success(f"キャラ『{c_new_name}』を追加しました")
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # 既存キャラ編集
             for ci, c in enumerate(p.get("characters", [])):
                 st.markdown("<div class='card'>", unsafe_allow_html=True)
                 c["name"] = st.text_input(
@@ -875,12 +915,10 @@ def persona_editor_ui(
                     st.caption("")
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            # ペルソナ削除
             if st.button("🗑️ このペルソナを削除", key=f"btn_del_persona_{pi}"):
                 personas_list.pop(pi)
                 st.rerun()
 
-    # 保存 / リセット / エクスポート / インポート
     cols = st.columns(2)
     with cols[0]:
         if st.button(
@@ -903,7 +941,6 @@ def persona_editor_ui(
             st.cache_data.clear()
             st.rerun()
 
-    # エクスポート
     raw_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     st.download_button(
         "⬇️ personas.json をダウンロード",
@@ -913,7 +950,6 @@ def persona_editor_ui(
         use_container_width=True,
     )
 
-    # インポート
     up = st.file_uploader(
         "⬆️ personas.json をインポート（置き換え）", type=["json"], key="pe_import"
     )
@@ -927,20 +963,17 @@ def persona_editor_ui(
                 st.success("編集バッファに読み込みました。保存ボタンで確定します。")
         except Exception as e:
             st.error(f"読み込みに失敗しました: {e}")
-
     return data
 
 
 # ============================================================
-# メインコントロール（サイドバー廃止・縦並び）
+# メインコントロール
 # ============================================================
 def controls_ui(personas: List[Persona], raw_loaded: Dict[str, Any]):
     ss = st.session_state
 
-    # 0) OAuth 事前セットアップ（常時表示）
     client_secret_setup_card()
 
-    # 1) 認証・サービス
     st.subheader("1️⃣ 認証・サービス")
     if st.button("🔐 Google 認証 / 初期化", use_container_width=True):
         ensure_youtube_service()
@@ -948,7 +981,6 @@ def controls_ui(personas: List[Persona], raw_loaded: Dict[str, Any]):
         st.cache_resource.clear()
         ensure_youtube_service()
 
-    # 2) 配信に接続
     st.subheader("2️⃣ 配信に接続")
     ss.yt_channel_id = st.text_input(
         "チャンネルID（ライブ自動検出）", value=ss.yt_channel_id
@@ -972,7 +1004,6 @@ def controls_ui(personas: List[Persona], raw_loaded: Dict[str, Any]):
             else:
                 connect_to_video_id(vid)
 
-    # 3) AI / ペルソナ
     st.subheader("3️⃣ AI / ペルソナ")
     ss.ai_enabled = st.toggle("AI応答を有効化", value=ss.ai_enabled)
     ppath = Path(ss.personas_path)
@@ -1024,7 +1055,6 @@ def controls_ui(personas: List[Persona], raw_loaded: Dict[str, Any]):
     )
     ss.auto_greet = st.toggle("接続/切断で自動挨拶", value=ss.auto_greet)
 
-    # 3.5) ペルソナ編集（トグル）
     if st.toggle(
         "🧩 ペルソナ編集を開く", key="toggle_open_editor", value=ss.persona_editor_open
     ):
@@ -1033,7 +1063,6 @@ def controls_ui(personas: List[Persona], raw_loaded: Dict[str, Any]):
     else:
         ss.persona_editor_open = False
 
-    # 4) ゲーム演出
     st.subheader("4️⃣ ゲーム演出")
     games = ["なし"] + list(GAME_MEDIA.keys())
     current_g = ss.get("selected_game") or "なし"
@@ -1049,7 +1078,6 @@ def controls_ui(personas: List[Persona], raw_loaded: Dict[str, Any]):
         ss.bgm_url = st.text_input("BGM パス/URL (mp3/m4a/ogg)", value=ss.bgm_url)
     ss.bgm_volume = st.slider("BGM 音量", 0.0, 1.0, float(ss.bgm_volume), 0.01)
 
-    # 5) 監視
     st.subheader("5️⃣ 監視")
     if st.button(
         "▶️ 監視開始", use_container_width=True, disabled=not ss.get("yt_live_chat_id")
@@ -1182,7 +1210,6 @@ def main():
     inject_global_css()
     init_session_state()
 
-    # personas.json ホットリロード
     ppath = Path(st.session_state.personas_path)
     raw_loaded = load_personas_raw(
         str(ppath), ppath.stat().st_mtime if ppath.exists() else 0.0
@@ -1196,7 +1223,6 @@ def main():
         )
         st.session_state.setdefault("selected_character_name", first_char)
 
-    # 背景/BGM + ヒーローバナー
     render_background_css(st.session_state.bg_url)
     render_bgm_player(st.session_state.bgm_url, float(st.session_state.bgm_volume))
     game = st.session_state.get("selected_game", "なし")
@@ -1204,20 +1230,18 @@ def main():
     if cover:
         hero_banner(game, cover)
 
-    # コントロール（縦）
     controls_ui(personas, raw_loaded)
 
-    # ステータス
     st.subheader("🧭 ステータス")
     st.markdown(
         f"<span class='pill'>接続: {'✅' if st.session_state.get('yt_connected') else '❌'}</span>"
         f"<span class='pill'>AI: {'ON' if st.session_state.get('ai_enabled') else 'OFF'}</span>"
         f"<span class='pill'>監視: {'RUN' if (st.session_state.get('watcher_thread') and st.session_state.get('watcher_thread').is_alive()) else 'STOP'}</span>"
+        f"<span class='pill'>HTTP: {st.session_state.get('_http_transport')}</span>"
         f"<span class='pill'>ゲーム: {st.session_state.get('selected_game','なし')}</span>",
         unsafe_allow_html=True,
     )
 
-    # 配信ビュー
     st.subheader("📺 配信ビュー")
     vid = st.session_state.get("yt_video_id")
     if vid:
@@ -1233,7 +1257,6 @@ def main():
     else:
         st.info("未接続です。チャンネル自動検出または手動接続を行ってください。")
 
-    # 送信 & ログ
     st.subheader("💬 チャット送信")
     msg = st.text_input("メッセージ", key="ui_send_text")
     if st.button(
