@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 YouTube Live Bot (Streamlit)
-Mobile First + Persona Editor + Mobile OAuth-friendly + SSL強化
+Mobile First + Persona Editor + OAuth-friendly + SSL強化 + Thread Context Fix + Pylance対策
 
 - スマホ向けミニマルUI（単一カラム / ガラス質感 / ヒーローバナー / チャットバブル）
 - YouTube連携：認証→ライブ自動検出→手動接続→監視→送信→自動挨拶
 - Gemini連携：AI自動返信（50文字以内）/ ON-OFF / ペルソナ切替
 - 演出：ゲーム選択で背景画像 & BGM 自動切替（/images, /audio）＋音量調整
 - ペルソナ管理：既定 personas.json を読み込み、追加・編集・削除をWeb UIで実行＆保存
-- 認証改善：スマホでもOKな client_secret.json アップロード/貼付保存＋手動OAuthフォールバック
-- SSL強化：httplib2 → Requests へ差し替え（httplib2shim）、CAをcertifi固定、エラー時リトライ
+- 認証改善：client_secret.json のアップロード/貼付保存＋手動OAuthフォールバック
+- SSL強化：certifi を使用、SSLエラー時は1回安全にリトライ
+- 重要修正：監視スレッドへ ScriptRunContext を付与。さらにフォールバックログで session_state 未初期化でも落ちない
+- Pylance対策：旧パスの静的 import を廃止し、importlib による動的ロードに変更
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import copy
 import base64
 import mimetypes
 import threading
+import importlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,6 +32,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 from streamlit.components.v1 import html as st_html
+
+# Streamlit スレッド用（新/旧両対応 / Pylance警告を出さない動的ロード）
+try:
+    # 新パス（Streamlit >= 1.25 目安）
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx  # type: ignore
+except Exception:
+    add_script_run_ctx = None  # type: ignore
+    get_script_run_ctx = None  # type: ignore
+    try:
+        # 旧パスを importlib で動的ロード（静的importにしないのでPylanceが怒らない）
+        _mod = importlib.import_module("streamlit.scriptrunner.script_run_context")
+        add_script_run_ctx = getattr(_mod, "add_script_run_ctx", None)
+        get_script_run_ctx = getattr(_mod, "get_script_run_ctx", None)
+    except Exception:
+        pass
 
 # --- Google / YouTube ---
 from google.oauth2.credentials import Credentials
@@ -51,6 +69,9 @@ JST = timezone(timedelta(hours=9), name="JST")
 YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|/live/|/shorts/)([A-Za-z0-9_-]{11})")
 PERSONAS_DEFAULT_PATH = "personas.json"
 SSL_ERR_HINT = "DECRYPTION_FAILED_OR_BAD_RECORD_MAC"
+
+# フォールバックのモジュールグローバルログ（最終手段）
+_FALLBACK_CHAT_LOG: List[Dict[str, Any]] = []
 
 
 def safe_idx(options: List[str], selected: Optional[str], default: int = 0) -> int:
@@ -187,47 +208,30 @@ def normalize_personas(raw: Dict[str, Any]) -> List[Persona]:
 
 
 # ============================================================
-# SSL/HTTP トランスポートの強化（重要）
+# SSL/HTTP 強化（certifi利用 & 安全リトライ）
 # ============================================================
 def patch_http_transport():
-    """httplib2 を Requests ベースに差し替え & CA を certifi に固定。何度呼んでも安全。"""
-    # CA を certifi に固定
     try:
-        import httplib2, certifi
+        import httplib2, certifi  # type: ignore
 
         httplib2.CA_CERTS = certifi.where()
     except Exception:
         pass
-    # httplib2 を requests に差し替え
-    try:
-        import httplib2shim
-
-        httplib2shim.patch()  # 以降、googleapiclient が内部で使う httplib2 は requests 経由に
-        st.session_state["_http_transport"] = "requests(httplib2shim)"
-    except Exception:
-        st.session_state["_http_transport"] = "httplib2"
+    # 何度呼んでもOK
+    st.session_state["_http_transport"] = "httplib2(certifi)"
 
 
 def execute_with_retry(req_call, *, where: str):
-    """SSLエラー時に 1 回だけパッチ→再生成→再実行のリトライを行う."""
     try:
         return req_call()
     except Exception as e:
-        es = f"{e}"
-        if SSL_ERR_HINT in es:
+        if SSL_ERR_HINT in f"{e}":
             st.warning(
-                f"SSLで失敗しました（{where}）。トランスポートを切替えて1回だけ再試行します。"
+                f"SSLで失敗しました（{where}）。CA設定をリフレッシュして1回だけ再試行します。"
             )
-            # パッチ → サービス再生成
             patch_http_transport()
-            try:
-                # YouTubeサービスを作り直して呼び直す側でリトライできるよう、上位側に例外を再送してもOK。
-                raise e
-            except Exception:
-                # ここでは単純に再実行（req_call がクロージャで新しい service を掴むなら成功）
-                return req_call()
-        else:
-            raise
+            return req_call()
+        raise
 
 
 # ============================================================
@@ -237,7 +241,7 @@ def client_secret_setup_card():
     ss = st.session_state
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown(
-        "**Google OAuth 設定** – `client_secret.json` がない場合は、ここで **アップロード** するか **中身を貼り付け** て保存してください。"
+        "**Google OAuth 設定** – `client_secret.json` が無いときは、ここで **アップロード** するか **中身を貼り付け** て保存します。"
     )
 
     c1, c2 = st.columns(2)
@@ -248,7 +252,7 @@ def client_secret_setup_card():
         if up is not None:
             try:
                 content = up.read().decode("utf-8")
-                json.loads(content)  # バリデーション
+                json.loads(content)
                 ss.client_secret_json = content
                 Path("client_secret.json").write_text(content, encoding="utf-8")
                 st.success(
@@ -283,7 +287,7 @@ def client_secret_setup_card():
                 st.error(f"削除に失敗: {e}")
     with cols[1]:
         st.caption(
-            "*認証はデスクトップで行うのが最も安定します。スマホのみの場合は上のアップロードで事前に設定し、認証ボタンを実行してください。*"
+            "*スマホで認証が難しい場合はPCで一度実行してtoken.jsonを作成してからスマホで使うのが安定です。*"
         )
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -310,7 +314,7 @@ def get_credentials() -> Credentials:
             secret_path = Path("client_secret.json")
             if cfg is None and not secret_path.exists():
                 st.error(
-                    "client_secret.json が見つかりません。上部カードでアップロード/貼り付けしてから、再度 認証 を押してください。"
+                    "client_secret.json が見つかりません。上部カードでアップロード/貼付してから、再度 認証 を押してください。"
                 )
                 raise FileNotFoundError("client_secret.json not found")
 
@@ -321,11 +325,12 @@ def get_credentials() -> Credentials:
             )
 
             try:
+                # 通常：ローカルブラウザで開く
                 creds = flow.run_local_server(port=0, open_browser=True)
-            except Exception as e:
+            except Exception:
+                # スマホ等でブラウザ自動起動不可のときの手動フロー
                 st.warning(
-                    "自動でブラウザを開けませんでした。\n\n【手順】1) 下のリンクで認証ページを開く → 2) ログイン/許可 → "
-                    "3) リダイレクト後のURL（http://localhost:ポート?code=... を含む全文）を貼り付け → 4) 認証を完了"
+                    "自動でブラウザを開けませんでした。下記ボタンで手動認証してください。"
                 )
                 auth_url, _ = flow.authorization_url(
                     access_type="offline",
@@ -334,18 +339,14 @@ def get_credentials() -> Credentials:
                 )
                 st.markdown(f"[🔓 Googleで認証ページを開く]({auth_url})")
                 redirect_full = st.text_input(
-                    "リダイレクト後のURL（http://localhost:ポート で始まる全文）",
+                    "リダイレクト後のURL（http://localhost:ポート?code=... を含む全文）",
                     key="oauth_redirect_url",
                 )
                 if st.button(
                     "✅ 認証を完了", key="btn_complete_oauth", use_container_width=True
                 ):
-                    try:
-                        flow.fetch_token(authorization_response=redirect_full)
-                        creds = flow.credentials
-                    except Exception as ee:
-                        st.error(f"トークン取得に失敗しました: {ee}")
-                        st.stop()
+                    flow.fetch_token(authorization_response=redirect_full)
+                    creds = flow.credentials
                 else:
                     st.stop()
         token_path.write_text(creds.to_json(), encoding="utf-8")
@@ -354,7 +355,6 @@ def get_credentials() -> Credentials:
 
 @st.cache_resource(show_spinner=False)
 def get_youtube_service(_creds: Credentials):
-    # ここで必ずトランスポートをパッチ（一度だけ）
     patch_http_transport()
     return build("youtube", "v3", credentials=_creds, cache_discovery=False)
 
@@ -375,7 +375,7 @@ def ensure_youtube_service() -> bool:
 
 
 # ============================================================
-# YouTube API 小物（SSLエラー時のワンリトライを付与）
+# YouTube API 小物（SSLエラー時のワンリトライ）
 # ============================================================
 def search_live_video_id_by_channel(youtube, channel_id: str) -> Optional[str]:
     def _call():
@@ -635,12 +635,9 @@ def init_session_state():
         "selected_persona_name": None,
         "selected_character_name": None,
         "selected_game": "なし",
-        # Persona Editor buffer
         "personas_edit": None,
         "persona_editor_open": False,
-        # OAuth client secret JSON content (optional)
         "client_secret_json": None,
-        # http transport memo
         "_http_transport": "unknown",
     }
     for k, v in defaults.items():
@@ -649,11 +646,17 @@ def init_session_state():
 
 
 def append_chat(row: Dict[str, Any]):
-    ss = st.session_state
-    if "chat_lock" not in ss:
-        ss["chat_lock"] = threading.Lock()
-    with ss.chat_lock:
-        ss.chat_log.append(row)
+    """スレッドからも安全に呼べるように徹底防御。"""
+    try:
+        ss = st.session_state
+        if "chat_log" not in ss:
+            ss["chat_log"] = []
+        if "chat_lock" not in ss:
+            ss["chat_lock"] = threading.Lock()
+        with ss.chat_lock:
+            ss.chat_log.append(row)
+    except Exception:
+        _FALLBACK_CHAT_LOG.append(row)
 
 
 # ============================================================
@@ -756,8 +759,15 @@ def hero_banner(game_title: str, cover_src: Optional[str]):
 
 
 def render_chat_log():
+    if _FALLBACK_CHAT_LOG:
+        st.session_state.setdefault("chat_log", [])
+        st.session_state.setdefault("chat_lock", threading.Lock())
+        with st.session_state["chat_lock"]:
+            st.session_state["chat_log"].extend(_FALLBACK_CHAT_LOG)
+            _FALLBACK_CHAT_LOG.clear()
+
     with st.container(height=460):
-        for row in st.session_state.chat_log[-800:]:
+        for row in st.session_state.get("chat_log", [])[-800:]:
             ts = row.get("time")
             author = row.get("author")
             text = row.get("text")
@@ -1165,7 +1175,12 @@ def start_watch(personas: List[Persona]):
         auto_reply=bool(ss.ai_enabled),
         rate_limit_sec=15,
     )
-    th = threading.Thread(target=watcher.run, daemon=True)
+    th = threading.Thread(target=watcher.run, daemon=True, name="ChatWatcher")
+    if add_script_run_ctx is not None:
+        try:
+            add_script_run_ctx(th)  # セッションの ScriptRunContext を付与
+        except Exception:
+            pass
     th.start()
     ss.watcher_thread = th
     st.success("チャット監視を開始しました")
